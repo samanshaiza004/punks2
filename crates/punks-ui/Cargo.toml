@@ -1,0 +1,11 @@
+[package]
+name = "punks-ui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+punks-browser = { path = "../punks-browser" }
+imgui = "0.12"
+rfd = "0.15"
+log = "0.4"

@@ -1,0 +1,11 @@
+[package]
+name = "punks-playback"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+symphonia = { version = "0.5", features = ["mp3"] }
+cpal = "0.17"
+rubato = "0.16"
+log = "0.4"

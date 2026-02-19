@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/punks-core",
+    "crates/punks-playback",
+    "crates/punks-browser",
+    "crates/punks-ui",
+    "punks-standalone",
+]
