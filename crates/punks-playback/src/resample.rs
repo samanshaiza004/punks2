@@ -1,10 +1,6 @@
 use crate::PlaybackError;
 use rubato::{FftFixedIn, Resampler};
 
-/// Resample interleaved f32 audio from `source_rate` to `target_rate`.
-///
-/// Input and output are interleaved with `channels` channels per frame.
-/// Uses FFT-based synchronous resampling for quality and speed on pre-decoded buffers.
 pub fn resample(
     interleaved: &[f32],
     channels: usize,
@@ -31,7 +27,6 @@ pub fn resample(
     )
     .map_err(|e| PlaybackError::DecodeError(format!("resampler init: {e}")))?;
 
-    // De-interleave into per-channel vectors
     let mut channel_data: Vec<Vec<f32>> = vec![Vec::with_capacity(num_frames); channels];
     for frame in 0..num_frames {
         for ch in 0..channels {
@@ -42,7 +37,6 @@ pub fn resample(
     let mut output_channels: Vec<Vec<f32>> = vec![Vec::new(); channels];
     let mut pos = 0;
 
-    // Process full chunks
     while pos + chunk_size <= num_frames {
         let input: Vec<&[f32]> = channel_data
             .iter()
@@ -60,7 +54,6 @@ pub fn resample(
         pos += chunk_size;
     }
 
-    // Process remaining frames
     if pos < num_frames {
         let input: Vec<&[f32]> = channel_data.iter().map(|ch| &ch[pos..]).collect();
 
@@ -73,7 +66,6 @@ pub fn resample(
         }
     }
 
-    // Re-interleave
     let out_frames = output_channels[0].len();
     let mut result = Vec::with_capacity(out_frames * channels);
     for frame in 0..out_frames {

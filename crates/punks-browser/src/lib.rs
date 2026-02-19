@@ -1,10 +1,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub use punks_core::{FileEntry, ScanResult, SUPPORTED_EXTENSIONS};
+pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
 pub use punks_playback::{PlaybackError, PlaybackStatus};
 
-use punks_core::ScanError;
 use punks_playback::PlaybackEngine;
 
 #[derive(Debug)]
@@ -38,14 +37,10 @@ impl From<PlaybackError> for BrowserError {
     }
 }
 
-/// The embeddable sample browser module.
-///
-/// Owns all state: file list, playback engine, current selection.
-/// No global state — create one instance per browser panel.
 pub struct SampleBrowser {
-    scan_result: Option<ScanResult>,
+    history: Vec<PathBuf>,
+    listing: Option<DirListing>,
     playback: PlaybackEngine,
-    current_dir: Option<PathBuf>,
     selected: Option<usize>,
     last_error: Option<String>,
 }
@@ -54,47 +49,99 @@ impl SampleBrowser {
     pub fn new() -> Result<Self, BrowserError> {
         let playback = PlaybackEngine::new()?;
         Ok(SampleBrowser {
-            scan_result: None,
+            history: Vec::new(),
+            listing: None,
             playback,
-            current_dir: None,
             selected: None,
             last_error: None,
         })
     }
 
-    /// Call once per frame. Checks whether a background decode has finished
-    /// and, if so, commits the audio buffer to start playback. Also picks up
-    /// any decode errors and stores them in [`last_error`].
     pub fn poll(&mut self) {
         if let Some(err) = self.playback.poll() {
             self.last_error = Some(err.to_string());
         }
     }
 
-    /// Scan a directory for audio files and replace the current file list.
     pub fn open_directory(&mut self, path: &Path) -> Result<(), BrowserError> {
-        let result = punks_core::scan_directory(path, SUPPORTED_EXTENSIONS)?;
-        self.current_dir = Some(path.to_path_buf());
-        self.scan_result = Some(result);
+        let listing = punks_core::list_directory(path)?;
+        self.history = vec![path.to_path_buf()];
+        self.listing = Some(listing);
         self.selected = None;
         self.last_error = None;
         Ok(())
     }
 
-    pub fn files(&self) -> &[FileEntry] {
-        self.scan_result
+    pub fn navigate_into(&mut self, index: usize) -> Result<(), BrowserError> {
+        let path = {
+            let entry = self.entries().get(index).ok_or(BrowserError::NoSelection)?;
+            if !entry.is_directory {
+                return Err(BrowserError::NoSelection);
+            }
+            entry.path.clone()
+        };
+
+        let listing = punks_core::list_directory(&path)?;
+        self.history.push(path);
+        self.listing = Some(listing);
+        self.selected = None;
+        Ok(())
+    }
+
+    pub fn navigate_up(&mut self) -> Result<(), BrowserError> {
+        if self.history.len() <= 1 {
+            return Ok(());
+        }
+        self.history.pop();
+        let path = self.history.last().unwrap().clone();
+        let listing = punks_core::list_directory(&path)?;
+        self.listing = Some(listing);
+        self.selected = None;
+        Ok(())
+    }
+
+    pub fn navigate_to_breadcrumb(&mut self, level: usize) -> Result<(), BrowserError> {
+        if level >= self.history.len() {
+            return Ok(());
+        }
+        self.history.truncate(level + 1);
+        let path = self.history.last().unwrap().clone();
+        let listing = punks_core::list_directory(&path)?;
+        self.listing = Some(listing);
+        self.selected = None;
+        Ok(())
+    }
+
+    pub fn entries(&self) -> &[FileEntry] {
+        self.listing
             .as_ref()
-            .map(|r| r.files.as_slice())
+            .map(|l| l.entries.as_slice())
             .unwrap_or(&[])
     }
 
     pub fn current_directory(&self) -> Option<&Path> {
-        self.current_dir.as_deref()
+        self.history.last().map(PathBuf::as_path)
+    }
+
+    pub fn breadcrumbs(&self) -> Vec<String> {
+        self.history
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.to_string_lossy().into_owned())
+            })
+            .collect()
+    }
+    pub fn can_navigate_up(&self) -> bool {
+        self.history.len() > 1
     }
 
     pub fn select(&mut self, index: usize) {
-        if index < self.files().len() {
-            self.selected = Some(index);
+        if let Some(entry) = self.entries().get(index) {
+            if !entry.is_directory {
+                self.selected = Some(index);
+            }
         }
     }
 
@@ -102,16 +149,14 @@ impl SampleBrowser {
         self.selected
     }
 
-    /// Begin playing the currently selected file. Decoding happens in the
-    /// background — call [`poll`] each frame to complete the handoff.
     pub fn play_selected(&mut self) {
         let index = match self.selected {
             Some(i) => i,
             None => return,
         };
-        let path = match self.files().get(index) {
-            Some(entry) => entry.path.clone(),
-            None => return,
+        let path = match self.entries().get(index) {
+            Some(entry) if !entry.is_directory => entry.path.clone(),
+            _ => return,
         };
 
         self.last_error = None;
@@ -126,7 +171,6 @@ impl SampleBrowser {
         self.playback.status()
     }
 
-    /// Last error message, if any. Cleared on successful operations.
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }

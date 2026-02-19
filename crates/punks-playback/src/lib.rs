@@ -44,12 +44,9 @@ impl fmt::Display for PlaybackError {
 impl std::error::Error for PlaybackError {}
 
 struct SharedState {
-    /// Interleaved f32 samples at the device's sample rate and channel count.
     samples: RwLock<Vec<f32>>,
-    /// Current read position in the samples buffer (in individual samples, not frames).
     cursor: AtomicUsize,
     playing: AtomicBool,
-    /// Total number of frames (samples.len() / device_channels).
     total_frames: AtomicUsize,
 }
 
@@ -226,7 +223,6 @@ impl PlaybackEngine {
     }
 }
 
-/// Decode, channel-adapt, and resample on the calling thread.
 fn decode_and_prepare(
     path: &Path,
     target_channels: usize,
@@ -279,7 +275,6 @@ fn audio_callback(data: &mut [f32], shared: &SharedState, _channels: usize) {
     }
 }
 
-/// Convert interleaved audio between different channel counts.
 fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
     if from == to || from == 0 || to == 0 {
         return samples.to_vec();

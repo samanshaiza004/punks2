@@ -3,26 +3,29 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Supported audio file extensions.
 pub const SUPPORTED_EXTENSIONS: &[&str] = &["wav", "flac", "mp3", "ogg"];
 
-/// A single audio file discovered during a directory scan.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub path: PathBuf,
     pub name: String,
     pub extension: String,
     pub size_bytes: u64,
+    pub is_directory: bool,
 }
 
-/// Result of scanning a directory for audio files.
+#[derive(Debug, Clone)]
+pub struct DirListing {
+    pub root: PathBuf,
+    pub entries: Vec<FileEntry>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ScanResult {
     pub root: PathBuf,
     pub files: Vec<FileEntry>,
 }
 
-/// Errors that can occur during scanning.
 #[derive(Debug)]
 pub enum ScanError {
     Io(io::Error),
@@ -53,11 +56,77 @@ impl From<io::Error> for ScanError {
     }
 }
 
-/// Scan `dir` for audio files matching the given extensions (case-insensitive).
-///
-/// Returns files sorted alphabetically by name. Non-recursive — only scans the
-/// immediate directory, not subdirectories. Files that cannot be read (permission
-/// errors, broken symlinks) are silently skipped.
+pub fn list_directory(dir: &Path) -> Result<DirListing, ScanError> {
+    if !dir.is_dir() {
+        return Err(ScanError::NotADirectory);
+    }
+
+    let mut dirs: Vec<FileEntry> = Vec::new();
+    let mut files: Vec<FileEntry> = Vec::new();
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        if name.starts_with('.') {
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        let path = entry.path();
+
+        if metadata.is_dir() {
+            dirs.push(FileEntry {
+                path,
+                name,
+                extension: String::new(),
+                size_bytes: 0,
+                is_directory: true,
+            });
+        } else if metadata.is_file() {
+            let ext = path
+                .extension()
+                .and_then(OsStr::to_str)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+
+            if SUPPORTED_EXTENSIONS.contains(&ext.as_str()) {
+                files.push(FileEntry {
+                    name,
+                    extension: ext,
+                    size_bytes: metadata.len(),
+                    path,
+                    is_directory: false,
+                });
+            }
+        }
+    }
+
+    let ci_sort = |a: &FileEntry, b: &FileEntry| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    };
+    dirs.sort_by(ci_sort);
+    files.sort_by(ci_sort);
+
+    let mut entries = dirs;
+    entries.extend(files);
+
+    Ok(DirListing {
+        root: dir.to_path_buf(),
+        entries,
+    })
+}
+
 pub fn scan_directory(dir: &Path, extensions: &[&str]) -> Result<ScanResult, ScanError> {
     if !dir.is_dir() {
         return Err(ScanError::NotADirectory);
@@ -105,6 +174,7 @@ pub fn scan_directory(dir: &Path, extensions: &[&str]) -> Result<ScanResult, Sca
             name,
             extension: ext,
             size_bytes: metadata.len(),
+            is_directory: false,
         });
     }
 
@@ -125,7 +195,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn setup_test_dir() -> tempfile::TempDir {
+    fn make_audio_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("kick.wav"), b"fake wav").unwrap();
         fs::write(dir.path().join("snare.flac"), b"fake flac").unwrap();
@@ -133,20 +203,145 @@ mod tests {
         fs::write(dir.path().join("pad.ogg"), b"fake ogg").unwrap();
         fs::write(dir.path().join("readme.txt"), b"not audio").unwrap();
         fs::write(dir.path().join("data.json"), b"not audio").unwrap();
-        fs::create_dir(dir.path().join("subdir")).unwrap();
+        fs::create_dir(dir.path().join("Loops")).unwrap();
+        fs::create_dir(dir.path().join("One-Shots")).unwrap();
         dir
     }
 
     #[test]
+    fn list_includes_subdirs_and_audio_files() {
+        let dir = make_audio_dir();
+        let result = list_directory(dir.path()).unwrap();
+        assert_eq!(result.entries.len(), 6);
+    }
+
+    #[test]
+    fn list_dirs_appear_before_files() {
+        let dir = make_audio_dir();
+        let result = list_directory(dir.path()).unwrap();
+        let is_dir_flags: Vec<bool> = result.entries.iter().map(|e| e.is_directory).collect();
+        let first_file = is_dir_flags.iter().position(|&d| !d).unwrap_or(0);
+        assert!(is_dir_flags[..first_file].iter().all(|&d| d));
+        assert!(is_dir_flags[first_file..].iter().all(|&d| !d));
+    }
+
+    #[test]
+    fn list_dirs_sorted_alphabetically() {
+        let dir = make_audio_dir();
+        let result = list_directory(dir.path()).unwrap();
+        let dir_names: Vec<&str> = result
+            .entries
+            .iter()
+            .filter(|e| e.is_directory)
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(dir_names, vec!["Loops", "One-Shots"]);
+    }
+
+    #[test]
+    fn list_files_sorted_alphabetically() {
+        let dir = make_audio_dir();
+        let result = list_directory(dir.path()).unwrap();
+        let file_names: Vec<&str> = result
+            .entries
+            .iter()
+            .filter(|e| !e.is_directory)
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(
+            file_names,
+            vec!["hihat.mp3", "kick.wav", "pad.ogg", "snare.flac"]
+        );
+    }
+
+    #[test]
+    fn list_excludes_non_audio_files() {
+        let dir = make_audio_dir();
+        let result = list_directory(dir.path()).unwrap();
+        let names: Vec<&str> = result.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&"readme.txt"));
+        assert!(!names.contains(&"data.json"));
+    }
+
+    #[test]
+    fn list_excludes_hidden_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("kick.wav"), b"data").unwrap();
+        fs::write(dir.path().join(".hidden.wav"), b"data").unwrap();
+        fs::create_dir(dir.path().join(".hiddendir")).unwrap();
+        let result = list_directory(dir.path()).unwrap();
+        let names: Vec<&str> = result.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.iter().any(|n| n.starts_with('.')));
+        assert_eq!(result.entries.len(), 1);
+    }
+
+    #[test]
+    fn list_empty_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = list_directory(dir.path()).unwrap();
+        assert!(result.entries.is_empty());
+    }
+
+    #[test]
+    fn list_not_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.wav");
+        fs::write(&file, b"data").unwrap();
+        assert!(matches!(
+            list_directory(&file),
+            Err(ScanError::NotADirectory)
+        ));
+    }
+
+    #[test]
+    fn list_nonexistent_path() {
+        assert!(list_directory(Path::new("/nonexistent/path/xyz")).is_err());
+    }
+
+    #[test]
+    fn list_dir_entry_has_correct_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("drums")).unwrap();
+        let result = list_directory(dir.path()).unwrap();
+        let entry = &result.entries[0];
+        assert_eq!(entry.name, "drums");
+        assert!(entry.is_directory);
+        assert_eq!(entry.size_bytes, 0);
+        assert!(entry.extension.is_empty());
+    }
+
+    #[test]
+    fn list_file_entry_has_correct_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("kick.wav"), b"12345").unwrap();
+        let result = list_directory(dir.path()).unwrap();
+        let entry = &result.entries[0];
+        assert_eq!(entry.name, "kick.wav");
+        assert!(!entry.is_directory);
+        assert_eq!(entry.extension, "wav");
+        assert_eq!(entry.size_bytes, 5);
+    }
+
+    #[test]
+    fn list_case_insensitive_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("test.WAV"), b"data").unwrap();
+        fs::write(dir.path().join("test.Mp3"), b"data").unwrap();
+        let result = list_directory(dir.path()).unwrap();
+        assert_eq!(result.entries.len(), 2);
+        assert!(result.entries.iter().all(|e| !e.is_directory));
+    }
+
+    #[test]
     fn scan_finds_supported_files() {
-        let dir = setup_test_dir();
+        let dir = make_audio_dir();
         let result = scan_directory(dir.path(), SUPPORTED_EXTENSIONS).unwrap();
         assert_eq!(result.files.len(), 4);
     }
 
     #[test]
     fn scan_excludes_non_audio() {
-        let dir = setup_test_dir();
+        let dir = make_audio_dir();
         let result = scan_directory(dir.path(), SUPPORTED_EXTENSIONS).unwrap();
         let names: Vec<&str> = result.files.iter().map(|f| f.name.as_str()).collect();
         assert!(!names.contains(&"readme.txt"));
@@ -155,15 +350,14 @@ mod tests {
 
     #[test]
     fn scan_excludes_directories() {
-        let dir = setup_test_dir();
+        let dir = make_audio_dir();
         let result = scan_directory(dir.path(), SUPPORTED_EXTENSIONS).unwrap();
-        let names: Vec<&str> = result.files.iter().map(|f| f.name.as_str()).collect();
-        assert!(!names.contains(&"subdir"));
+        assert!(result.files.iter().all(|f| !f.is_directory));
     }
 
     #[test]
     fn scan_sorts_alphabetically() {
-        let dir = setup_test_dir();
+        let dir = make_audio_dir();
         let result = scan_directory(dir.path(), SUPPORTED_EXTENSIONS).unwrap();
         let names: Vec<&str> = result.files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
@@ -193,19 +387,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("file.txt");
         fs::write(&file_path, b"data").unwrap();
-        let result = scan_directory(&file_path, SUPPORTED_EXTENSIONS);
-        assert!(matches!(result, Err(ScanError::NotADirectory)));
+        assert!(matches!(
+            scan_directory(&file_path, SUPPORTED_EXTENSIONS),
+            Err(ScanError::NotADirectory)
+        ));
     }
 
     #[test]
     fn scan_nonexistent_path() {
-        let result = scan_directory(Path::new("/nonexistent/path"), SUPPORTED_EXTENSIONS);
-        assert!(result.is_err());
+        assert!(scan_directory(Path::new("/nonexistent/path"), SUPPORTED_EXTENSIONS).is_err());
     }
 
     #[test]
     fn scan_records_root() {
-        let dir = setup_test_dir();
+        let dir = make_audio_dir();
         let result = scan_directory(dir.path(), SUPPORTED_EXTENSIONS).unwrap();
         assert_eq!(result.root, dir.path());
     }
@@ -220,6 +415,7 @@ mod tests {
         assert_eq!(entry.name, "test.wav");
         assert_eq!(entry.extension, "wav");
         assert_eq!(entry.size_bytes, 5);
+        assert!(!entry.is_directory);
     }
 
     #[test]
