@@ -138,10 +138,8 @@ impl SampleBrowser {
     }
 
     pub fn select(&mut self, index: usize) {
-        if let Some(entry) = self.entries().get(index) {
-            if !entry.is_directory {
-                self.selected = Some(index);
-            }
+        if index < self.entries().len() {
+            self.selected = Some(index);
         }
     }
 

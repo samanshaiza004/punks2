@@ -1,12 +1,15 @@
+use imgui::Key;
 use punks_browser::{PlaybackStatus, SampleBrowser};
 
 pub struct BrowserPanel {
-    last_clicked: Option<usize>,
+    _last_clicked: Option<usize>,
 }
 
 impl BrowserPanel {
     pub fn new() -> Self {
-        BrowserPanel { last_clicked: None }
+        BrowserPanel {
+            _last_clicked: None,
+        }
     }
 
     pub fn draw(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
@@ -70,6 +73,7 @@ impl BrowserPanel {
         let avail = ui.content_region_avail();
         let list_height = (avail[1] - 70.0).max(100.0);
 
+        // Keyboard: Up/Down move selection, Enter opens dir or plays file when list has focus.
         ui.child_window("file_list")
             .size([avail[0], list_height])
             .build(|| {
@@ -81,22 +85,58 @@ impl BrowserPanel {
                     }
                 } else {
                     let selected = browser.selected();
+                    if ui.is_window_focused() {
+                        if ui.is_key_pressed_no_repeat(Key::UpArrow) {
+                            let idx = selected.unwrap_or(0).saturating_sub(1);
+                            browser.select(idx);
+                        }
+                        if ui.is_key_pressed_no_repeat(Key::DownArrow) {
+                            let idx = (selected.unwrap_or(0) + 1).min(entry_count.saturating_sub(1));
+                            browser.select(idx);
+                        }
+                        let enter = ui.is_key_pressed_no_repeat(Key::Enter)
+                            || ui.is_key_pressed_no_repeat(Key::KeypadEnter);
+                        if enter {
+                            if let Some(i) = selected {
+                                let entries = browser.entries();
+                                if let Some(entry) = entries.get(i) {
+                                    if entry.is_directory {
+                                        if let Err(e) = browser.navigate_into(i) {
+                                            log::error!("navigate_into failed: {e}");
+                                        }
+                                    } else {
+                                        browser.play_selected();
+                                    }
+                                }
+                            }
+                        }
+                    }
                     for (label, is_dir, i) in &entry_meta {
-                        let is_selected = !is_dir && selected == Some(*i);
-
-                        if *is_dir {
-                            // Tint directory rows slightly to distinguish them
-                            let tint = [0.55, 0.85, 1.0, 1.0];
-                            ui.text_colored(tint, label.split("##").next().unwrap_or(label));
-                            if ui.is_item_clicked() {
+                        let is_selected = selected == Some(*i);
+                        let display_label = label.split("##").next().unwrap_or(label);
+                        let (clicked, used) = if *is_dir {
+                            // Directories: selectable with tint so hover/selected match files
+                            let color =
+                                ui.push_style_color(imgui::StyleColor::Text, [0.55, 0.85, 1.0, 1.0]);
+                            let clicked = ui
+                                .selectable_config(display_label)
+                                .selected(is_selected)
+                                .build();
+                            color.pop();
+                            (clicked, true)
+                        } else {
+                            (ui.selectable_config(label).selected(is_selected).build(), true)
+                        };
+                        if clicked && used {
+                            browser.select(*i);
+                            self._last_clicked = Some(*i);
+                            if *is_dir {
                                 if let Err(e) = browser.navigate_into(*i) {
                                     log::error!("navigate_into failed: {e}");
                                 }
+                            } else {
+                                browser.play_selected();
                             }
-                        } else if ui.selectable_config(label).selected(is_selected).build() {
-                            browser.select(*i);
-                            self.last_clicked = Some(*i);
-                            browser.play_selected();
                         }
                     }
                 }
