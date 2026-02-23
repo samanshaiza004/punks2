@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use imgui::Key;
 use punks_browser::{PlaybackStatus, SampleBrowser};
 
@@ -12,7 +14,12 @@ impl BrowserPanel {
         }
     }
 
-    pub fn draw(&mut self, ui: &imgui::Ui, browser: &mut SampleBrowser) {
+    pub fn draw(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        on_drag_file: Option<&mut dyn FnMut(&Path)>,
+    ) {
         browser.poll();
         if ui.button("Browse...") {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
@@ -55,7 +62,7 @@ impl BrowserPanel {
         ui.separator();
 
         let entry_count = browser.entries().len();
-        let entry_meta: Vec<(String, bool, usize)> = browser
+        let entry_meta: Vec<(String, bool, usize, PathBuf)> = browser
             .entries()
             .iter()
             .enumerate()
@@ -66,12 +73,13 @@ impl BrowserPanel {
                     let kb = e.size_bytes as f64 / 1024.0;
                     format!("{}  ({:.1} KB)##entry{}", e.name, kb, i)
                 };
-                (label, e.is_directory, i)
+                (label, e.is_directory, i, e.path.clone())
             })
             .collect();
 
         let avail = ui.content_region_avail();
         let list_height = (avail[1] - 70.0).max(100.0);
+        let mut drag_requested: Option<PathBuf> = None;
 
         // Keyboard: Up/Down move selection, Enter opens dir or plays file when list has focus.
         ui.child_window("file_list")
@@ -111,7 +119,7 @@ impl BrowserPanel {
                             }
                         }
                     }
-                    for (label, is_dir, i) in &entry_meta {
+                    for (label, is_dir, i, entry_path) in &entry_meta {
                         let is_selected = selected == Some(*i);
                         let display_label = label.split("##").next().unwrap_or(label);
                         let (clicked, used) = if *is_dir {
@@ -127,6 +135,13 @@ impl BrowserPanel {
                         } else {
                             (ui.selectable_config(label).selected(is_selected).build(), true)
                         };
+                        if !*is_dir
+                            && ui.is_item_hovered()
+                            && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
+                        {
+                            drag_requested = Some(entry_path.clone());
+                            break;
+                        }
                         if clicked && used {
                             browser.select(*i);
                             self._last_clicked = Some(*i);
@@ -141,6 +156,13 @@ impl BrowserPanel {
                     }
                 }
             });
+
+        if let Some(path) = drag_requested.as_deref() {
+            if let Some(on_drag_file) = on_drag_file {
+                on_drag_file(path);
+            }
+            return;
+        }
 
         ui.separator();
 
