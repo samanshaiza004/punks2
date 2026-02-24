@@ -1,6 +1,6 @@
 # punks2
 
-A modular sample browser for musicians, built in Rust. Designed as the first standalone module for a future open-source DAW.
+A modular sample browser for musicians, built in Rust.
 
 ## What it does
 
@@ -8,20 +8,6 @@ A modular sample browser for musicians, built in Rust. Designed as the first sta
 - Browse files in a scrollable list
 - Click to preview-play through your default audio device
 - Stop playback
-
-## Architecture
-
-Five crates, one responsibility each:
-
-| Crate | Role |
-|---|---|
-| `punks-core` | File scanning, types, metadata — zero external deps |
-| `punks-playback` | Audio decode (symphonia) + output (cpal) + resampling (rubato) |
-| `punks-browser` | Module facade — composes core + playback behind a clean API |
-| `punks-ui` | imgui rendering — no window ownership, embeddable in any imgui host |
-| `punks-standalone` | Binary — winit + wgpu + imgui bootstrap |
-
-The DAW integration path: depend on `punks-browser` + `punks-ui`, create a `SampleBrowser`, call `panel.draw(&ui, &mut browser)` inside your imgui frame.
 
 ## Building
 
@@ -66,4 +52,4 @@ browser.stop();
 
 ## License
 
-MIT OR Apache-2.0
+MIT

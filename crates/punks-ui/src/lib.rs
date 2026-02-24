@@ -166,32 +166,7 @@ impl BrowserPanel {
 
         ui.separator();
 
-        match browser.playback_status() {
-            PlaybackStatus::Idle => {
-                ui.text_disabled("Idle");
-            }
-            PlaybackStatus::Loading { file } => {
-                let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                ui.text(format!("Loading: {name}..."));
-            }
-            PlaybackStatus::Playing {
-                file,
-                position,
-                duration,
-            } => {
-                let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                let pos_s = position.as_secs();
-                let dur_s = duration.as_secs();
-                ui.text(format!(
-                    "Playing: {}  {}:{:02} / {}:{:02}",
-                    name,
-                    pos_s / 60,
-                    pos_s % 60,
-                    dur_s / 60,
-                    dur_s % 60,
-                ));
-            }
-        }
+        draw_waveform_widget(ui, browser);
 
         if ui.button("Stop") {
             browser.stop();
@@ -207,5 +182,99 @@ impl BrowserPanel {
 impl Default for BrowserPanel {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+const WAVEFORM_BG: [f32; 4] = [0.12, 0.12, 0.14, 1.0];
+const WAVEFORM_BAR: [f32; 4] = [0.30, 0.75, 0.45, 1.0];
+const WAVEFORM_PLAYHEAD: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
+const WAVEFORM_TEXT: [f32; 4] = [1.0, 1.0, 1.0, 0.85];
+
+fn color_u32(c: [f32; 4]) -> u32 {
+    let r = (c[0] * 255.0) as u32;
+    let g = (c[1] * 255.0) as u32;
+    let b = (c[2] * 255.0) as u32;
+    let a = (c[3] * 255.0) as u32;
+    (a << 24) | (b << 16) | (g << 8) | r
+}
+
+fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser) {
+    let [cx, cy] = ui.cursor_screen_pos();
+    let w = ui.content_region_avail()[0];
+    const H: f32 = 64.0;
+    ui.dummy([w, H]);
+
+    let draw = ui.get_window_draw_list();
+
+    let bg = color_u32(WAVEFORM_BG);
+    let bar_color = color_u32(WAVEFORM_BAR);
+    let playhead_color = color_u32(WAVEFORM_PLAYHEAD);
+    let text_color = color_u32(WAVEFORM_TEXT);
+
+    draw.add_rect([cx, cy], [cx + w, cy + H], bg)
+        .filled(true)
+        .build();
+
+    if let Some(peaks) = browser.waveform_peaks() {
+        let bar_w = (w / peaks.num_buckets as f32).max(1.0);
+        let mid_y = cy + H / 2.0;
+        let half_h = H / 2.0;
+
+        for (i, &(lo, hi)) in peaks.peaks.iter().enumerate() {
+            let x = cx + i as f32 * bar_w;
+            let y_top = mid_y - hi * half_h;
+            let y_bot = (mid_y - lo * half_h).max(y_top + 1.0);
+            draw.add_rect([x, y_top], [x + bar_w - 0.5, y_bot], bar_color)
+                .filled(true)
+                .build();
+        }
+    }
+
+    match browser.playback_status() {
+        PlaybackStatus::Playing {
+            file,
+            position,
+            duration,
+        } => {
+            let dur_secs = duration.as_secs_f32();
+            if dur_secs > 0.0 {
+                let t = position.as_secs_f32() / dur_secs;
+                let px = cx + t * w;
+                draw.add_line([px, cy], [px, cy + H], playhead_color)
+                    .build();
+            }
+            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            let pos_s = position.as_secs();
+            let dur_s = duration.as_secs();
+            draw.add_text(
+                [cx + 4.0, cy + 2.0],
+                text_color,
+                format!(
+                    "{}  {}:{:02} / {}:{:02}",
+                    name,
+                    pos_s / 60,
+                    pos_s % 60,
+                    dur_s / 60,
+                    dur_s % 60,
+                ),
+            );
+        }
+        PlaybackStatus::Loading { file } => {
+            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            draw.add_text(
+                [cx + 4.0, cy + H / 2.0 - 7.0],
+                text_color,
+                format!("Loading: {name}..."),
+            );
+        }
+        PlaybackStatus::Idle => {
+            if browser.waveform_peaks().is_none() {
+                draw.add_text(
+                    [cx + 4.0, cy + H / 2.0 - 7.0],
+                    color_u32([0.5, 0.5, 0.5, 0.7]),
+                    "Idle",
+                );
+            }
+        }
     }
 }

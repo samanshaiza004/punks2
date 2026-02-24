@@ -9,7 +9,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
 
 mod decode;
+pub mod peaks;
 mod resample;
+
+pub use peaks::WaveformPeaks;
 
 #[derive(Debug, Clone)]
 pub enum PlaybackStatus {
@@ -54,6 +57,7 @@ struct PreparedAudio {
     samples: Vec<f32>,
     total_frames: usize,
     file: PathBuf,
+    peaks: WaveformPeaks,
 }
 
 struct PendingLoad {
@@ -67,6 +71,7 @@ pub struct PlaybackEngine {
     device_sample_rate: u32,
     device_channels: u16,
     current_file: Option<PathBuf>,
+    current_peaks: Option<WaveformPeaks>,
     pending: Option<PendingLoad>,
 }
 
@@ -117,6 +122,7 @@ impl PlaybackEngine {
             device_sample_rate: sample_rate,
             device_channels: channels,
             current_file: None,
+            current_peaks: None,
             pending: None,
         })
     }
@@ -129,6 +135,7 @@ impl PlaybackEngine {
         // Drop any in-flight decode (the orphaned thread will finish and its
         // send will harmlessly fail on the disconnected channel).
         self.pending = None;
+        self.current_peaks = None;
 
         let path_buf = path.to_path_buf();
         let target_channels = self.device_channels as usize;
@@ -164,6 +171,7 @@ impl PlaybackEngine {
                     .total_frames
                     .store(audio.total_frames, Ordering::SeqCst);
                 self.current_file = Some(audio.file);
+                self.current_peaks = Some(audio.peaks);
                 self.shared.playing.store(true, Ordering::SeqCst);
                 self.pending = None;
                 None
@@ -221,6 +229,10 @@ impl PlaybackEngine {
             None => PlaybackStatus::Idle,
         }
     }
+
+    pub fn waveform_peaks(&self) -> Option<&WaveformPeaks> {
+        self.current_peaks.as_ref()
+    }
 }
 
 fn decode_and_prepare(
@@ -229,6 +241,12 @@ fn decode_and_prepare(
     target_rate: u32,
 ) -> Result<PreparedAudio, PlaybackError> {
     let decoded = decode::decode_file(path)?;
+
+    let waveform_peaks = peaks::compute_peaks(
+        &decoded.interleaved,
+        decoded.channels as usize,
+        peaks::DEFAULT_NUM_BUCKETS,
+    );
 
     let samples = adapt_channels(
         &decoded.interleaved,
@@ -248,6 +266,7 @@ fn decode_and_prepare(
         samples,
         total_frames,
         file: path.to_path_buf(),
+        peaks: waveform_peaks,
     })
 }
 

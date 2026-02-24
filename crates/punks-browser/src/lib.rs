@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
-pub use punks_playback::{PlaybackError, PlaybackStatus};
+pub use punks_playback::{PlaybackError, PlaybackStatus, WaveformPeaks};
 
 use punks_playback::PlaybackEngine;
 
@@ -175,5 +175,9 @@ impl SampleBrowser {
 
     pub fn clear_error(&mut self) {
         self.last_error = None;
+    }
+
+    pub fn waveform_peaks(&self) -> Option<&WaveformPeaks> {
+        self.playback.waveform_peaks()
     }
 }
