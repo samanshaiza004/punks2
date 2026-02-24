@@ -9,3 +9,4 @@ symphonia = { version = "0.5", features = ["mp3"] }
 cpal = "0.17"
 rubato = "0.16"
 log = "0.4"
+lru = "0.12"

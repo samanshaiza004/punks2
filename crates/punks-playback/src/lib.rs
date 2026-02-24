@@ -1,9 +1,12 @@
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+use lru::LruCache;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
@@ -53,6 +56,7 @@ struct SharedState {
     total_frames: AtomicUsize,
 }
 
+#[derive(Clone)]
 struct PreparedAudio {
     samples: Vec<f32>,
     total_frames: usize,
@@ -65,6 +69,8 @@ struct PendingLoad {
     receiver: mpsc::Receiver<Result<PreparedAudio, PlaybackError>>,
 }
 
+const CACHE_CAPACITY: usize = 10;
+
 pub struct PlaybackEngine {
     shared: Arc<SharedState>,
     _stream: cpal::Stream,
@@ -73,6 +79,7 @@ pub struct PlaybackEngine {
     current_file: Option<PathBuf>,
     current_peaks: Option<WaveformPeaks>,
     pending: Option<PendingLoad>,
+    cache: LruCache<PathBuf, Arc<PreparedAudio>>,
 }
 
 impl PlaybackEngine {
@@ -124,20 +131,43 @@ impl PlaybackEngine {
             current_file: None,
             current_peaks: None,
             pending: None,
+            cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
         })
     }
 
-    /// Begin loading and playing a file. Decoding and resampling happen on a
-    /// background thread — this returns immediately. Call [`poll`] each frame
-    /// to check for completion and commit the audio buffer.
+    fn commit(&mut self, audio: &Arc<PreparedAudio>) {
+        {
+            let mut buf = self.shared.samples.write().unwrap();
+            buf.clone_from(&audio.samples);
+        }
+        self.shared.cursor.store(0, Ordering::SeqCst);
+        self.shared
+            .total_frames
+            .store(audio.total_frames, Ordering::SeqCst);
+        self.current_file = Some(audio.file.clone());
+        self.current_peaks = Some(audio.peaks.clone());
+        self.shared.playing.store(true, Ordering::SeqCst);
+        self.pending = None;
+    }
+
+    /// Begin loading and playing a file. If the file was recently decoded it
+    /// is served from an in-memory cache and playback starts immediately.
+    /// Otherwise decoding and resampling happen on a background thread — this
+    /// returns immediately. Call [`poll`] each frame to check for completion
+    /// and commit the audio buffer.
     pub fn play(&mut self, path: &Path) {
         self.shared.playing.store(false, Ordering::SeqCst);
-        // Drop any in-flight decode (the orphaned thread will finish and its
-        // send will harmlessly fail on the disconnected channel).
         self.pending = None;
-        self.current_peaks = None;
 
         let path_buf = path.to_path_buf();
+
+        if let Some(cached) = self.cache.get(&path_buf) {
+            let cached = Arc::clone(cached);
+            self.commit(&cached);
+            return;
+        }
+
+        self.current_peaks = None;
         let target_channels = self.device_channels as usize;
         let target_rate = self.device_sample_rate;
 
@@ -162,18 +192,9 @@ impl PlaybackEngine {
 
         match pending.receiver.try_recv() {
             Ok(Ok(audio)) => {
-                {
-                    let mut buf = self.shared.samples.write().unwrap();
-                    *buf = audio.samples;
-                }
-                self.shared.cursor.store(0, Ordering::SeqCst);
-                self.shared
-                    .total_frames
-                    .store(audio.total_frames, Ordering::SeqCst);
-                self.current_file = Some(audio.file);
-                self.current_peaks = Some(audio.peaks);
-                self.shared.playing.store(true, Ordering::SeqCst);
-                self.pending = None;
+                let arc = Arc::new(audio);
+                self.cache.put(arc.file.clone(), Arc::clone(&arc));
+                self.commit(&arc);
                 None
             }
             Ok(Err(e)) => {
