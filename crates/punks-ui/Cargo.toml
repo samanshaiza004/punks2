@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+punks-core = { path = "../punks-core" }
 punks-browser = { path = "../punks-browser" }
 imgui = "0.12"
 rfd = "0.15"

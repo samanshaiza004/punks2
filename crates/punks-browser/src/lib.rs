@@ -48,13 +48,20 @@ pub struct SampleBrowser {
 impl SampleBrowser {
     pub fn new() -> Result<Self, BrowserError> {
         let playback = PlaybackEngine::new()?;
-        Ok(SampleBrowser {
+        let mut browser = SampleBrowser {
             history: Vec::new(),
             listing: None,
             playback,
             selected: None,
             last_error: None,
-        })
+        };
+
+        let cfg = punks_core::config::load();
+        if let Some(dir) = cfg.last_directory.filter(|p| p.is_dir()) {
+            let _ = browser.open_directory(&dir);
+        }
+
+        Ok(browser)
     }
 
     pub fn poll(&mut self) {

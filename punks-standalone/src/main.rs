@@ -92,7 +92,7 @@ impl AppWindow {
         let size = LogicalSize::new(800.0, 600.0);
         let attributes = Window::default_attributes()
             .with_inner_size(size)
-            .with_title("punks2 — Sample Browser");
+            .with_title("punks2");
         let window = Arc::new(event_loop.create_window(attributes).unwrap());
 
         let phys_size = window.inner_size();

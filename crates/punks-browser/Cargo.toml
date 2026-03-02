@@ -7,3 +7,4 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 punks-core = { path = "../punks-core" }
 punks-playback = { path = "../punks-playback" }
+log = "0.4"

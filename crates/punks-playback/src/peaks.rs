@@ -6,8 +6,6 @@ pub struct WaveformPeaks {
     pub num_buckets: usize,
 }
 
-/// Compute min/max peak pairs by bucketing interleaved multi-channel samples
-/// into `num_buckets` bins. Channels are averaged to mono before peak detection.
 pub fn compute_peaks(samples: &[f32], channels: usize, num_buckets: usize) -> WaveformPeaks {
     let channels = channels.max(1);
     let num_frames = samples.len() / channels;

@@ -1,3 +1,5 @@
+pub mod config;
+
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
