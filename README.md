@@ -52,4 +52,4 @@ browser.stop();
 
 ## License
 
-MIT
+[MIT](LICENSE)
