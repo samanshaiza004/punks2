@@ -185,8 +185,6 @@ impl PlaybackEngine {
         });
     }
 
-    /// Poll for background decode completion. Call once per frame from the UI
-    /// thread. Returns `Some(err)` if decoding failed, `None` otherwise.
     pub fn poll(&mut self) -> Option<PlaybackError> {
         let pending = self.pending.as_ref()?;
 
@@ -217,7 +215,6 @@ impl PlaybackEngine {
         self.current_file = None;
     }
 
-    /// Returns `true` while a background decode is in progress.
     pub fn is_loading(&self) -> bool {
         self.pending.is_some()
     }

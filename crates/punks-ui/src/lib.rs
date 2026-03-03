@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use imgui::Key;
 use punks_browser::{PlaybackStatus, SampleBrowser};
@@ -88,9 +89,35 @@ const KEYBIND_ACTIONS: &[(BrowserAction, &str)] = &[
     (BrowserAction::Confirm, "Confirm / Play"),
 ];
 
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+
+fn relative_parent(root: Option<&Path>, file_path: &Path) -> String {
+    let parent = match file_path.parent() {
+        Some(p) => p,
+        None => return String::new(),
+    };
+    if let Some(root) = root {
+        if let Ok(rel) = parent.strip_prefix(root) {
+            let s = rel.to_string_lossy();
+            if s.is_empty() {
+                return ".".into();
+            }
+            return s.into_owned();
+        }
+    }
+    parent
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 pub struct BrowserPanel {
     prefs: PunksConfig,
     rebinding: Option<BrowserAction>,
+    search_buf: String,
+    last_typed_query: String,
+    query_change_time: Instant,
+    last_searched_query: String,
 }
 
 impl BrowserPanel {
@@ -98,6 +125,10 @@ impl BrowserPanel {
         BrowserPanel {
             prefs: punks_core::config::load(),
             rebinding: None,
+            search_buf: String::new(),
+            last_typed_query: String::new(),
+            query_change_time: Instant::now(),
+            last_searched_query: String::new(),
         }
     }
 
@@ -116,6 +147,9 @@ impl BrowserPanel {
                 } else {
                     self.prefs.last_directory = Some(path);
                     punks_core::config::save(&self.prefs);
+                    self.search_buf.clear();
+                    self.last_typed_query.clear();
+                    self.last_searched_query.clear();
                 }
             }
         }
@@ -159,21 +193,32 @@ impl BrowserPanel {
 
         ui.separator();
 
-        let entry_count = browser.entries().len();
-        let entry_meta: Vec<(String, bool, usize, PathBuf)> = browser
-            .entries()
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let label = if e.is_directory {
-                    format!("> {}##entry{}", e.name, i)
-                } else {
-                    let kb = e.size_bytes as f64 / 1024.0;
-                    format!("{}  ({:.1} KB)##entry{}", e.name, kb, i)
-                };
-                (label, e.is_directory, i, e.path.clone())
-            })
-            .collect();
+        let avail = ui.content_region_avail();
+        ui.set_next_item_width(avail[0]);
+        ui.input_text("##search", &mut self.search_buf)
+            .hint("Search...")
+            .build();
+
+        let search_focused = ui.is_item_active();
+
+        if self.search_buf != self.last_typed_query {
+            self.last_typed_query = self.search_buf.clone();
+            self.query_change_time = Instant::now();
+        }
+        if self.query_change_time.elapsed() >= SEARCH_DEBOUNCE
+            && self.last_typed_query != self.last_searched_query
+        {
+            self.last_searched_query = self.last_typed_query.clone();
+            if self.last_searched_query.is_empty() {
+                browser.clear_search();
+            } else {
+                browser.search(&self.last_searched_query);
+            }
+        }
+
+        if browser.is_searching() && !browser.is_in_search_mode() {
+            ui.text_disabled("Searching...");
+        }
 
         let avail = ui.content_region_avail();
         let list_height = (avail[1] - 70.0).max(100.0);
@@ -184,90 +229,32 @@ impl BrowserPanel {
         let back_key = parse_key(&self.prefs.keybinds.navigate_back).unwrap_or(Key::A);
         let conf_key = parse_key(&self.prefs.keybinds.confirm).unwrap_or(Key::D);
 
+        let in_search = browser.is_in_search_mode();
+
         ui.child_window("file_list")
             .size([avail[0], list_height])
             .build(|| {
-                if entry_count == 0 {
-                    if browser.current_directory().is_some() {
-                        ui.text_disabled("Empty directory.");
-                    } else {
-                        ui.text_disabled("No folder open. Click Browse to get started.");
-                    }
+                if in_search {
+                    self.draw_search_results(
+                        ui,
+                        browser,
+                        &mut drag_requested,
+                        search_focused,
+                        up_key,
+                        down_key,
+                        back_key,
+                    );
                 } else {
-                    let selected = browser.selected();
-                    if ui.is_window_focused() {
-                        if ui.is_key_pressed_no_repeat(up_key) {
-                            let idx = selected.unwrap_or(0).saturating_sub(1);
-                            browser.select(idx);
-                            browser.play_selected();
-                        }
-                        if ui.is_key_pressed_no_repeat(down_key) {
-                            let idx =
-                                (selected.unwrap_or(0) + 1).min(entry_count.saturating_sub(1));
-                            browser.select(idx);
-                            browser.play_selected();
-                        }
-                        if ui.is_key_pressed_no_repeat(back_key) {
-                            if let Err(e) = browser.navigate_up() {
-                                log::error!("navigate_up failed: {e}");
-                            }
-                        }
-                        let confirm = ui.is_key_pressed_no_repeat(conf_key)
-                            || ui.is_key_pressed_no_repeat(Key::Enter)
-                            || ui.is_key_pressed_no_repeat(Key::KeypadEnter);
-                        if confirm {
-                            if let Some(i) = selected {
-                                let entries = browser.entries();
-                                if let Some(entry) = entries.get(i) {
-                                    if entry.is_directory {
-                                        if let Err(e) = browser.navigate_into(i) {
-                                            log::error!("navigate_into failed: {e}");
-                                        }
-                                    } else {
-                                        browser.play_selected();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    for (label, is_dir, i, entry_path) in &entry_meta {
-                        let is_selected = selected == Some(*i);
-                        let display_label = label.split("##").next().unwrap_or(label);
-                        let (clicked, used) = if *is_dir {
-                            let color = ui.push_style_color(
-                                imgui::StyleColor::Text,
-                                [0.55, 0.85, 1.0, 1.0],
-                            );
-                            let clicked = ui
-                                .selectable_config(display_label)
-                                .selected(is_selected)
-                                .build();
-                            color.pop();
-                            (clicked, true)
-                        } else {
-                            (
-                                ui.selectable_config(label).selected(is_selected).build(),
-                                true,
-                            )
-                        };
-                        if !*is_dir
-                            && ui.is_item_hovered()
-                            && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
-                        {
-                            drag_requested = Some(entry_path.clone());
-                            break;
-                        }
-                        if clicked && used {
-                            browser.select(*i);
-                            if *is_dir {
-                                if let Err(e) = browser.navigate_into(*i) {
-                                    log::error!("navigate_into failed: {e}");
-                                }
-                            } else {
-                                browser.play_selected();
-                            }
-                        }
-                    }
+                    self.draw_browse_list(
+                        ui,
+                        browser,
+                        &mut drag_requested,
+                        search_focused,
+                        up_key,
+                        down_key,
+                        back_key,
+                        conf_key,
+                    );
                 }
             });
 
@@ -289,6 +276,199 @@ impl BrowserPanel {
         if let Some(err) = browser.last_error() {
             ui.same_line();
             ui.text_colored([1.0, 0.3, 0.3, 1.0], err);
+        }
+    }
+
+    fn draw_search_results(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        drag_requested: &mut Option<PathBuf>,
+        search_focused: bool,
+        up_key: Key,
+        down_key: Key,
+        back_key: Key,
+    ) {
+        let results = match browser.search_results() {
+            Some(r) => r,
+            None => {
+                ui.text_disabled("Searching...");
+                return;
+            }
+        };
+
+        if results.is_empty() {
+            ui.text_disabled("No results.");
+            return;
+        }
+
+        let count = results.len();
+        let root = browser.current_directory();
+        let result_meta: Vec<(String, PathBuf, usize)> = results
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let parent_hint = relative_parent(root, &e.path);
+                let kb = e.size_bytes as f64 / 1024.0;
+                let label = format!(
+                    "{}  ({:.1} KB)  ({})##sresult{}",
+                    e.name, kb, parent_hint, i
+                );
+                (label, e.path.clone(), i)
+            })
+            .collect();
+
+        if ui.is_window_focused() && !search_focused {
+            if ui.is_key_pressed_no_repeat(up_key) {
+                let idx = browser.search_selected().unwrap_or(0).saturating_sub(1);
+                browser.select_search_result(idx);
+                if let Some(e) = browser.search_results().and_then(|r| r.get(idx)) {
+                    let path = e.path.clone();
+                    browser.play_file(&path);
+                }
+            }
+            if ui.is_key_pressed_no_repeat(down_key) {
+                let idx = (browser.search_selected().unwrap_or(0) + 1)
+                    .min(count.saturating_sub(1));
+                browser.select_search_result(idx);
+                if let Some(e) = browser.search_results().and_then(|r| r.get(idx)) {
+                    let path = e.path.clone();
+                    browser.play_file(&path);
+                }
+            }
+            if ui.is_key_pressed_no_repeat(back_key) {
+                self.search_buf.clear();
+                self.last_typed_query.clear();
+                self.last_searched_query.clear();
+                browser.clear_search();
+                return;
+            }
+        }
+
+        let selected = browser.search_selected();
+        for (label, entry_path, i) in &result_meta {
+            let is_selected = selected == Some(*i);
+            let clicked = ui.selectable_config(label).selected(is_selected).build();
+            if ui.is_item_hovered()
+                && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
+            {
+                *drag_requested = Some(entry_path.clone());
+                break;
+            }
+            if clicked {
+                browser.select_search_result(*i);
+                browser.play_file(entry_path);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_browse_list(
+        &mut self,
+        ui: &imgui::Ui,
+        browser: &mut SampleBrowser,
+        drag_requested: &mut Option<PathBuf>,
+        search_focused: bool,
+        up_key: Key,
+        down_key: Key,
+        back_key: Key,
+        conf_key: Key,
+    ) {
+        let entry_count = browser.entries().len();
+        let entry_meta: Vec<(String, bool, usize, PathBuf)> = browser
+            .entries()
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let label = if e.is_directory {
+                    format!("> {}##entry{}", e.name, i)
+                } else {
+                    let kb = e.size_bytes as f64 / 1024.0;
+                    format!("{}  ({:.1} KB)##entry{}", e.name, kb, i)
+                };
+                (label, e.is_directory, i, e.path.clone())
+            })
+            .collect();
+
+        if entry_count == 0 {
+            if browser.current_directory().is_some() {
+                ui.text_disabled("Empty directory.");
+            } else {
+                ui.text_disabled("No folder open. Click Browse to get started.");
+            }
+            return;
+        }
+
+        let selected = browser.selected();
+        if ui.is_window_focused() && !search_focused {
+            if ui.is_key_pressed_no_repeat(up_key) {
+                let idx = selected.unwrap_or(0).saturating_sub(1);
+                browser.select(idx);
+                browser.play_selected();
+            }
+            if ui.is_key_pressed_no_repeat(down_key) {
+                let idx = (selected.unwrap_or(0) + 1).min(entry_count.saturating_sub(1));
+                browser.select(idx);
+                browser.play_selected();
+            }
+            if ui.is_key_pressed_no_repeat(back_key) {
+                if let Err(e) = browser.navigate_up() {
+                    log::error!("navigate_up failed: {e}");
+                }
+            }
+            let confirm = ui.is_key_pressed_no_repeat(conf_key)
+                || ui.is_key_pressed_no_repeat(Key::Enter)
+                || ui.is_key_pressed_no_repeat(Key::KeypadEnter);
+            if confirm {
+                if let Some(i) = selected {
+                    let entries = browser.entries();
+                    if let Some(entry) = entries.get(i) {
+                        if entry.is_directory {
+                            if let Err(e) = browser.navigate_into(i) {
+                                log::error!("navigate_into failed: {e}");
+                            }
+                        } else {
+                            browser.play_selected();
+                        }
+                    }
+                }
+            }
+        }
+        for (label, is_dir, i, entry_path) in &entry_meta {
+            let is_selected = selected == Some(*i);
+            let display_label = label.split("##").next().unwrap_or(label);
+            let (clicked, used) = if *is_dir {
+                let color =
+                    ui.push_style_color(imgui::StyleColor::Text, [0.55, 0.85, 1.0, 1.0]);
+                let clicked = ui
+                    .selectable_config(display_label)
+                    .selected(is_selected)
+                    .build();
+                color.pop();
+                (clicked, true)
+            } else {
+                (
+                    ui.selectable_config(label).selected(is_selected).build(),
+                    true,
+                )
+            };
+            if !*is_dir
+                && ui.is_item_hovered()
+                && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
+            {
+                *drag_requested = Some(entry_path.clone());
+                break;
+            }
+            if clicked && used {
+                browser.select(*i);
+                if *is_dir {
+                    if let Err(e) = browser.navigate_into(*i) {
+                        log::error!("navigate_into failed: {e}");
+                    }
+                } else {
+                    browser.play_selected();
+                }
+            }
         }
     }
 

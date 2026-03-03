@@ -1,5 +1,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
 pub use punks_playback::{PlaybackError, PlaybackStatus, WaveformPeaks};
@@ -43,6 +44,9 @@ pub struct SampleBrowser {
     playback: PlaybackEngine,
     selected: Option<usize>,
     last_error: Option<String>,
+    search_results: Option<Vec<FileEntry>>,
+    search_rx: Option<mpsc::Receiver<Vec<FileEntry>>>,
+    search_selected: Option<usize>,
 }
 
 impl SampleBrowser {
@@ -54,6 +58,9 @@ impl SampleBrowser {
             playback,
             selected: None,
             last_error: None,
+            search_results: None,
+            search_rx: None,
+            search_selected: None,
         };
 
         let cfg = punks_core::config::load();
@@ -68,6 +75,20 @@ impl SampleBrowser {
         if let Some(err) = self.playback.poll() {
             self.last_error = Some(err.to_string());
         }
+
+        if let Some(rx) = &self.search_rx {
+            match rx.try_recv() {
+                Ok(results) => {
+                    self.search_results = Some(results);
+                    self.search_rx = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.search_results = Some(Vec::new());
+                    self.search_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
     }
 
     pub fn open_directory(&mut self, path: &Path) -> Result<(), BrowserError> {
@@ -76,6 +97,7 @@ impl SampleBrowser {
         self.listing = Some(listing);
         self.selected = None;
         self.last_error = None;
+        self.clear_search();
         Ok(())
     }
 
@@ -168,6 +190,11 @@ impl SampleBrowser {
         self.playback.play(&path);
     }
 
+    pub fn play_file(&mut self, path: &Path) {
+        self.last_error = None;
+        self.playback.play(path);
+    }
+
     pub fn stop(&mut self) {
         self.playback.stop();
     }
@@ -186,5 +213,52 @@ impl SampleBrowser {
 
     pub fn waveform_peaks(&self) -> Option<&WaveformPeaks> {
         self.playback.waveform_peaks()
+    }
+
+    pub fn search(&mut self, query: &str) {
+        let root = match self.current_directory() {
+            Some(p) => p.to_path_buf(),
+            None => return,
+        };
+        let query = query.to_string();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let results = punks_core::search_directory(&root, &query, SUPPORTED_EXTENSIONS)
+                .unwrap_or_default();
+            let _ = tx.send(results);
+        });
+        self.search_rx = Some(rx);
+        self.search_results = None;
+        self.search_selected = None;
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search_results = None;
+        self.search_rx = None;
+        self.search_selected = None;
+    }
+
+    pub fn is_searching(&self) -> bool {
+        self.search_rx.is_some()
+    }
+
+    pub fn is_in_search_mode(&self) -> bool {
+        self.search_results.is_some() || self.search_rx.is_some()
+    }
+
+    pub fn search_results(&self) -> Option<&[FileEntry]> {
+        self.search_results.as_deref()
+    }
+
+    pub fn search_selected(&self) -> Option<usize> {
+        self.search_selected
+    }
+
+    pub fn select_search_result(&mut self, index: usize) {
+        if let Some(results) = &self.search_results {
+            if index < results.len() {
+                self.search_selected = Some(index);
+            }
+        }
     }
 }

@@ -129,6 +129,85 @@ pub fn list_directory(dir: &Path) -> Result<DirListing, ScanError> {
     })
 }
 
+pub fn search_directory(
+    root: &Path,
+    query: &str,
+    extensions: &[&str],
+) -> Result<Vec<FileEntry>, ScanError> {
+    if !root.is_dir() {
+        return Err(ScanError::NotADirectory);
+    }
+
+    let query_lower = query.to_ascii_lowercase();
+    let ext_lower: Vec<String> = extensions.iter().map(|e| e.to_ascii_lowercase()).collect();
+
+    let mut results = Vec::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(root.to_path_buf());
+
+    while let Some(current) = queue.pop_front() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+
+            if name.starts_with('.') {
+                continue;
+            }
+
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+
+            if file_type.is_dir() {
+                queue.push_back(path);
+                continue;
+            }
+
+            if !name.to_ascii_lowercase().contains(&query_lower) {
+                continue;
+            }
+
+            let ext = path
+                .extension()
+                .and_then(OsStr::to_str)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+
+            if !ext_lower.is_empty() && !ext_lower.contains(&ext) {
+                continue;
+            }
+
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            results.push(FileEntry {
+                name,
+                extension: ext,
+                size_bytes: metadata.len(),
+                path,
+                is_directory: false,
+            });
+        }
+    }
+
+    results.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    });
+
+    Ok(results)
+}
+
 pub fn scan_directory(dir: &Path, extensions: &[&str]) -> Result<ScanResult, ScanError> {
     if !dir.is_dir() {
         return Err(ScanError::NotADirectory);
