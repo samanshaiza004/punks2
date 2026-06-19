@@ -118,17 +118,21 @@ pub struct BrowserPanel {
     last_typed_query: String,
     query_change_time: Instant,
     last_searched_query: String,
+    volume: f32,
 }
 
 impl BrowserPanel {
     pub fn new() -> Self {
+        let prefs = punks_core::config::load();
+        let volume = prefs.volume;
         BrowserPanel {
-            prefs: punks_core::config::load(),
+            prefs,
             rebinding: None,
             search_buf: String::new(),
             last_typed_query: String::new(),
             query_change_time: Instant::now(),
             last_searched_query: String::new(),
+            volume,
         }
     }
 
@@ -271,6 +275,19 @@ impl BrowserPanel {
 
         if ui.button("Stop") {
             browser.stop();
+        }
+
+        ui.same_line();
+        ui.text("Vol");
+        ui.same_line();
+        ui.set_next_item_width(100.0);
+        ui.slider("##volume", 0.0_f32, 1.0_f32, &mut self.volume);
+        if ui.is_item_edited() {
+            browser.set_volume(self.volume);
+        }
+        if ui.is_item_deactivated_after_edit() {
+            self.prefs.volume = self.volume;
+            punks_core::config::save(&self.prefs);
         }
 
         if let Some(err) = browser.last_error() {

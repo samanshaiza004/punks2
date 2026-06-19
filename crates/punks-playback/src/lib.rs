@@ -1,7 +1,7 @@
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -54,6 +54,7 @@ struct SharedState {
     cursor: AtomicUsize,
     playing: AtomicBool,
     total_frames: AtomicUsize,
+    volume: AtomicU32,
 }
 
 #[derive(Clone)]
@@ -103,6 +104,7 @@ impl PlaybackEngine {
             cursor: AtomicUsize::new(0),
             playing: AtomicBool::new(false),
             total_frames: AtomicUsize::new(0),
+            volume: AtomicU32::new(1.0f32.to_bits()),
         });
 
         let cb_shared = Arc::clone(&shared);
@@ -251,6 +253,16 @@ impl PlaybackEngine {
     pub fn waveform_peaks(&self) -> Option<&WaveformPeaks> {
         self.current_peaks.as_ref()
     }
+
+    pub fn set_volume(&self, v: f32) {
+        self.shared
+            .volume
+            .store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.shared.volume.load(Ordering::Relaxed))
+    }
 }
 
 fn decode_and_prepare(
@@ -298,8 +310,14 @@ fn audio_callback(data: &mut [f32], shared: &SharedState, _channels: usize) {
         let cursor = shared.cursor.load(Ordering::Relaxed);
         let remaining = samples.len().saturating_sub(cursor);
         let to_copy = remaining.min(data.len());
+        let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
 
-        data[..to_copy].copy_from_slice(&samples[cursor..cursor + to_copy]);
+        for (dst, &src) in data[..to_copy]
+            .iter_mut()
+            .zip(&samples[cursor..cursor + to_copy])
+        {
+            *dst = src * volume;
+        }
 
         if to_copy < data.len() {
             data[to_copy..].fill(0.0);

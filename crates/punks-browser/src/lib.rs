@@ -64,6 +64,7 @@ impl SampleBrowser {
         };
 
         let cfg = punks_core::config::load();
+        browser.playback.set_volume(cfg.volume);
         if let Some(dir) = cfg.last_directory.filter(|p| p.is_dir()) {
             let _ = browser.open_directory(&dir);
         }
@@ -213,6 +214,14 @@ impl SampleBrowser {
 
     pub fn waveform_peaks(&self) -> Option<&WaveformPeaks> {
         self.playback.waveform_peaks()
+    }
+
+    pub fn set_volume(&self, v: f32) {
+        self.playback.set_volume(v);
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.playback.volume()
     }
 
     pub fn search(&mut self, query: &str) {

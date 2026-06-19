@@ -26,6 +26,9 @@ fn default_navigate_back() -> String {
 fn default_confirm() -> String {
     "D".into()
 }
+fn default_volume() -> f32 {
+    1.0
+}
 
 impl Default for Keybinds {
     fn default() -> Self {
@@ -38,12 +41,24 @@ impl Default for Keybinds {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PunksConfig {
     #[serde(default)]
     pub last_directory: Option<PathBuf>,
     #[serde(default)]
     pub keybinds: Keybinds,
+    #[serde(default = "default_volume")]
+    pub volume: f32,
+}
+
+impl Default for PunksConfig {
+    fn default() -> Self {
+        PunksConfig {
+            last_directory: None,
+            keybinds: Keybinds::default(),
+            volume: default_volume(),
+        }
+    }
 }
 
 fn config_path() -> Option<PathBuf> {

@@ -77,7 +77,6 @@ mod tests {
 
     #[test]
     fn stereo_averages_channels() {
-        // Left = 1.0, Right = -1.0 → mono average = 0.0
         let samples = vec![1.0f32, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
         let peaks = compute_peaks(&samples, 2, 2);
         for &(lo, hi) in &peaks.peaks {
