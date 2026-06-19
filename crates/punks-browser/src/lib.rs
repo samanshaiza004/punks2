@@ -208,10 +208,6 @@ impl SampleBrowser {
         self.last_error.as_deref()
     }
 
-    pub fn clear_error(&mut self) {
-        self.last_error = None;
-    }
-
     pub fn waveform_peaks(&self) -> Option<&WaveformPeaks> {
         self.playback.waveform_peaks()
     }

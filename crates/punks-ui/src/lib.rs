@@ -144,13 +144,25 @@ impl BrowserPanel {
     ) {
         browser.poll();
 
+        // Persist the deepest directory the user has navigated into, so the
+        // browser restores exactly where they left off. One check here covers
+        // every navigation path (keyboard, click, breadcrumb, Up, Browse) and
+        // fires at most once per actual directory change. It only ever moves the
+        // saved path forward — it never clobbers a saved location with `None`
+        // when no folder is open (e.g. a temporarily unavailable drive).
+        if let Some(dir) = browser.current_directory() {
+            if self.prefs.last_directory.as_deref() != Some(dir) {
+                self.prefs.last_directory = Some(dir.to_path_buf());
+                punks_core::config::save(&self.prefs);
+            }
+        }
+
         if ui.button("Browse...") {
             if let Some(path) = rfd::FileDialog::new().pick_folder() {
                 if let Err(e) = browser.open_directory(&path) {
                     log::error!("failed to open directory: {e}");
                 } else {
-                    self.prefs.last_directory = Some(path);
-                    punks_core::config::save(&self.prefs);
+                    // last_directory is persisted centrally at the top of draw().
                     self.search_buf.clear();
                     self.last_typed_query.clear();
                     self.last_searched_query.clear();
@@ -273,29 +285,48 @@ impl BrowserPanel {
 
         draw_waveform_widget(ui, browser);
 
+        // Transport row: transport controls on the left, volume slider pinned to
+        // the right edge of the panel to mirror the target layout.
+        let row_origin_x = ui.cursor_pos()[0];
+        let row_width = ui.content_region_avail()[0];
+
         if ui.button("Stop") {
             browser.stop();
         }
 
+        const VOLUME_SLIDER_WIDTH: f32 = 120.0;
         ui.same_line();
-        ui.text("Vol");
-        ui.same_line();
-        ui.set_next_item_width(100.0);
-        ui.slider("##volume", 0.0_f32, 1.0_f32, &mut self.volume);
-        if ui.is_item_edited() {
+        let row_y = ui.cursor_pos()[1];
+        ui.set_cursor_pos([
+            row_origin_x + (row_width - VOLUME_SLIDER_WIDTH).max(0.0),
+            row_y,
+        ]);
+        ui.set_next_item_width(VOLUME_SLIDER_WIDTH);
+        let mut vol = self.volume;
+        let changed = ui
+            .slider_config("##volume", 0.0_f32, 1.0_f32)
+            .display_format("")
+            .build(&mut vol);
+        let hovered = ui.is_item_hovered();
+        let committed = ui.is_item_deactivated_after_edit();
+        if changed {
+            self.volume = vol;
             browser.set_volume(self.volume);
         }
-        if ui.is_item_deactivated_after_edit() {
+        if hovered {
+            ui.tooltip_text(format!("Volume: {}%", (self.volume * 100.0).round() as i32));
+        }
+        if committed {
             self.prefs.volume = self.volume;
             punks_core::config::save(&self.prefs);
         }
 
         if let Some(err) = browser.last_error() {
-            ui.same_line();
             ui.text_colored([1.0, 0.3, 0.3, 1.0], err);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_search_results(
         &mut self,
         ui: &imgui::Ui,
@@ -507,11 +538,9 @@ impl BrowserPanel {
             ui.same_line();
             if ui.button("Browse##settings") {
                 if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    // last_directory is persisted centrally at the top of draw().
                     if let Err(e) = browser.open_directory(&path) {
                         log::error!("failed to open directory: {e}");
-                    } else {
-                        self.prefs.last_directory = Some(path);
-                        punks_core::config::save(&self.prefs);
                     }
                 }
             }

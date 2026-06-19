@@ -108,13 +108,12 @@ impl PlaybackEngine {
         });
 
         let cb_shared = Arc::clone(&shared);
-        let cb_channels = channels as usize;
 
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    audio_callback(data, &cb_shared, cb_channels);
+                    audio_callback(data, &cb_shared);
                 },
                 |err| log::error!("audio stream error: {err}"),
                 None,
@@ -217,10 +216,6 @@ impl PlaybackEngine {
         self.current_file = None;
     }
 
-    pub fn is_loading(&self) -> bool {
-        self.pending.is_some()
-    }
-
     pub fn status(&self) -> PlaybackStatus {
         if let Some(pending) = &self.pending {
             return PlaybackStatus::Loading {
@@ -300,7 +295,7 @@ fn decode_and_prepare(
     })
 }
 
-fn audio_callback(data: &mut [f32], shared: &SharedState, _channels: usize) {
+fn audio_callback(data: &mut [f32], shared: &SharedState) {
     if !shared.playing.load(Ordering::Relaxed) {
         data.fill(0.0);
         return;
