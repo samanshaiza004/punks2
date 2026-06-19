@@ -17,24 +17,45 @@ pub struct DecodedAudio {
 }
 
 pub fn decode_file(path: &Path) -> Result<DecodedAudio, PlaybackError> {
-    let file =
-        File::open(path).map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+    // Try with extension hint first; if the hinted prober rejects the file
+    // (e.g. a WAV container with an unrecognised format tag), reopen and
+    // probe without a hint so every registered prober gets a chance.
+    let probed = {
+        let file =
+            File::open(path).map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
 
-    let mut hint = Hint::new();
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        hint.with_extension(ext);
-    }
-
-    let probed = symphonia::default::get_probe()
-        .format(
+        match symphonia::default::get_probe().format(
             &hint,
             mss,
             &FormatOptions::default(),
             &MetadataOptions::default(),
-        )
-        .map_err(|e| PlaybackError::DecodeError(format!("probe failed: {e}")))?;
+        ) {
+            Ok(p) => p,
+            Err(_) => {
+                let file2 = File::open(path)
+                    .map_err(|e| PlaybackError::DecodeError(format!("{path:?}: {e}")))?;
+                let mss2 = MediaSourceStream::new(Box::new(file2), Default::default());
+                symphonia::default::get_probe()
+                    .format(
+                        &Hint::new(),
+                        mss2,
+                        &FormatOptions::default(),
+                        &MetadataOptions::default(),
+                    )
+                    .map_err(|_| {
+                        PlaybackError::DecodeError(
+                            "unsupported audio format (WAV codec not recognised)".into(),
+                        )
+                    })?
+            }
+        }
+    };
 
     let mut format = probed.format;
 

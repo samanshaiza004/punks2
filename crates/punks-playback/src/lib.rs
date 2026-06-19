@@ -138,7 +138,15 @@ impl PlaybackEngine {
 
     fn commit(&mut self, audio: &Arc<PreparedAudio>) {
         {
-            let mut buf = self.shared.samples.write().unwrap();
+            // Recover from a poisoned lock rather than propagating a panic to
+            // the UI thread. The samples are the source of truth; if the lock
+            // was poisoned mid-write the data is suspect, but silence from the
+            // audio callback is safer than a crash.
+            let mut buf = self
+                .shared
+                .samples
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
             buf.clone_from(&audio.samples);
         }
         self.shared.cursor.store(0, Ordering::SeqCst);
@@ -147,7 +155,10 @@ impl PlaybackEngine {
             .store(audio.total_frames, Ordering::SeqCst);
         self.current_file = Some(audio.file.clone());
         self.current_peaks = Some(audio.peaks.clone());
-        self.shared.playing.store(true, Ordering::SeqCst);
+        // Release pairs with the Acquire load in audio_callback, so the
+        // callback is guaranteed to observe cursor=0 and the new samples
+        // whenever it sees playing==true.
+        self.shared.playing.store(true, Ordering::Release);
         self.pending = None;
     }
 
@@ -296,7 +307,9 @@ fn decode_and_prepare(
 }
 
 fn audio_callback(data: &mut [f32], shared: &SharedState) {
-    if !shared.playing.load(Ordering::Relaxed) {
+    // Acquire pairs with the Release store in commit(), ensuring this thread
+    // sees cursor=0 and the new sample buffer whenever playing is true.
+    if !shared.playing.load(Ordering::Acquire) {
         data.fill(0.0);
         return;
     }
@@ -332,14 +345,21 @@ fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
 
     let num_frames = samples.len() / from;
     let mut out = Vec::with_capacity(num_frames * to);
+    let inv_from = 1.0 / from as f32;
 
     for frame in 0..num_frames {
         let base = frame * from;
-        for ch in 0..to {
-            if ch < from {
-                out.push(samples[base + ch]);
-            } else {
-                out.push(samples[base + from - 1]);
+        if from > to {
+            // Downmix: sum all source channels to mono, then write to every
+            // output channel. (L+R)/2 for stereo→mono; correct for all counts.
+            let mono: f32 = (0..from).map(|ch| samples[base + ch]).sum::<f32>() * inv_from;
+            for _ in 0..to {
+                out.push(mono);
+            }
+        } else {
+            // Upmix: copy available channels, replicate last one for the rest.
+            for ch in 0..to {
+                out.push(samples[base + ch.min(from - 1)]);
             }
         }
     }

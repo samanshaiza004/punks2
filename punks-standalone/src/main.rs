@@ -21,9 +21,9 @@ use punks_ui::BrowserPanel;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const DRAG_PREVIEW_ICON_PNG: &[u8] = &[
-    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
-    0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255, 63, 0,
-    5, 254, 2, 254, 167, 53, 129, 207, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
+    0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255, 63, 0, 5,
+    254, 2, 254, 167, 53, 129, 207, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
 ];
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -38,9 +38,15 @@ fn start_file_drag(window: &Window, path: &std::path::Path) {
 
     let item = DragItem::Files(vec![drag_path]);
     let preview = Image::Raw(DRAG_PREVIEW_ICON_PNG.to_vec());
-    if let Err(err) = drag::start_drag(window, item, preview, |result, _cursor_position| {
-        log::debug!("drag finished: {result:?}");
-    }, Default::default()) {
+    if let Err(err) = drag::start_drag(
+        window,
+        item,
+        preview,
+        |result, _cursor_position| {
+            log::debug!("drag finished: {result:?}");
+        },
+        Default::default(),
+    ) {
         log::error!("failed to start drag operation: {err}");
     }
 }

@@ -237,7 +237,7 @@ impl BrowserPanel {
         }
 
         let avail = ui.content_region_avail();
-        let list_height = (avail[1] - 70.0).max(100.0);
+        let list_height = (avail[1] - 110.0).max(100.0);
         let mut drag_requested: Option<PathBuf> = None;
 
         let up_key = parse_key(&self.prefs.keybinds.navigate_up).unwrap_or(Key::W);
@@ -283,23 +283,38 @@ impl BrowserPanel {
 
         ui.separator();
 
-        draw_waveform_widget(ui, browser);
-
-        // Transport row: transport controls on the left, volume slider pinned to
-        // the right edge of the panel to mirror the target layout.
-        let row_origin_x = ui.cursor_pos()[0];
-        let row_width = ui.content_region_avail()[0];
-
-        if ui.button("Stop") {
-            browser.stop();
+        // Space bar toggles playback in both browse and search modes.
+        if ui.is_window_focused() && !search_focused && ui.is_key_pressed_no_repeat(Key::Space) {
+            match browser.playback_status() {
+                PlaybackStatus::Playing { .. } | PlaybackStatus::Loading { .. } => {
+                    browser.stop();
+                }
+                PlaybackStatus::Idle => {
+                    if in_search {
+                        if let Some(idx) = browser.search_selected() {
+                            if let Some(e) = browser.search_results().and_then(|r| r.get(idx)) {
+                                let path = e.path.clone();
+                                browser.play_file(&path);
+                            }
+                        }
+                    } else {
+                        browser.play_selected();
+                    }
+                }
+            }
         }
 
+        draw_waveform_widget(ui, browser);
+
+        // Transport row: volume slider pinned to the right edge of the panel.
+        let transport_x = ui.cursor_pos()[0];
+        let transport_y = ui.cursor_pos()[1];
+        let panel_width = ui.content_region_avail()[0];
         const VOLUME_SLIDER_WIDTH: f32 = 120.0;
-        ui.same_line();
-        let row_y = ui.cursor_pos()[1];
+
         ui.set_cursor_pos([
-            row_origin_x + (row_width - VOLUME_SLIDER_WIDTH).max(0.0),
-            row_y,
+            transport_x + (panel_width - VOLUME_SLIDER_WIDTH).max(0.0),
+            transport_y,
         ]);
         ui.set_next_item_width(VOLUME_SLIDER_WIDTH);
         let mut vol = self.volume;
@@ -337,35 +352,23 @@ impl BrowserPanel {
         down_key: Key,
         back_key: Key,
     ) {
-        let results = match browser.search_results() {
-            Some(r) => r,
+        let count = match browser.search_results() {
+            Some(r) if !r.is_empty() => r.len(),
+            Some(_) => {
+                ui.text_disabled("No results.");
+                return;
+            }
             None => {
                 ui.text_disabled("Searching...");
                 return;
             }
         };
 
-        if results.is_empty() {
-            ui.text_disabled("No results.");
-            return;
-        }
+        // Clone root so we don't hold a borrow on browser during keyboard
+        // handling or the clipper loop.
+        let root: Option<PathBuf> = browser.current_directory().map(|p| p.to_path_buf());
 
-        let count = results.len();
-        let root = browser.current_directory();
-        let result_meta: Vec<(String, PathBuf, usize)> = results
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let parent_hint = relative_parent(root, &e.path);
-                let kb = e.size_bytes as f64 / 1024.0;
-                let label = format!(
-                    "{}  ({:.1} KB)  ({})##sresult{}",
-                    e.name, kb, parent_hint, i
-                );
-                (label, e.path.clone(), i)
-            })
-            .collect();
-
+        // Keyboard navigation — mutable borrows happen here, before the clipper.
         if ui.is_window_focused() && !search_focused {
             if ui.is_key_pressed_no_repeat(up_key) {
                 let idx = browser.search_selected().unwrap_or(0).saturating_sub(1);
@@ -376,8 +379,7 @@ impl BrowserPanel {
                 }
             }
             if ui.is_key_pressed_no_repeat(down_key) {
-                let idx = (browser.search_selected().unwrap_or(0) + 1)
-                    .min(count.saturating_sub(1));
+                let idx = (browser.search_selected().unwrap_or(0) + 1).min(count.saturating_sub(1));
                 browser.select_search_result(idx);
                 if let Some(e) = browser.search_results().and_then(|r| r.get(idx)) {
                     let path = e.path.clone();
@@ -394,19 +396,41 @@ impl BrowserPanel {
         }
 
         let selected = browser.search_selected();
-        for (label, entry_path, i) in &result_meta {
-            let is_selected = selected == Some(*i);
-            let clicked = ui.selectable_config(label).selected(is_selected).build();
+        let mut click_action: Option<(usize, PathBuf)> = None;
+
+        // Only render the visible rows; label strings are allocated per
+        // visible item, not for every result every frame.
+        let clip = imgui::ListClipper::new(count as i32).begin(ui);
+        for row_i in clip.iter() {
+            let i = row_i as usize;
+            // Extract owned data in a short block so the borrow on browser
+            // ends before we call any mutable method.
+            let (label, path) = {
+                let results = browser.search_results().unwrap();
+                let e = &results[i];
+                let parent_hint = relative_parent(root.as_deref(), &e.path);
+                let label = format!("{}  ({})##sresult{}", e.name, parent_hint, i);
+                (label, e.path.clone())
+            };
+
+            let clicked = ui
+                .selectable_config(&label)
+                .selected(selected == Some(i))
+                .build();
             if ui.is_item_hovered()
                 && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
             {
-                *drag_requested = Some(entry_path.clone());
+                *drag_requested = Some(path);
                 break;
             }
             if clicked {
-                browser.select_search_result(*i);
-                browser.play_file(entry_path);
+                click_action = Some((i, path));
             }
+        }
+
+        if let Some((i, path)) = click_action {
+            browser.select_search_result(i);
+            browser.play_file(&path);
         }
     }
 
@@ -423,20 +447,6 @@ impl BrowserPanel {
         conf_key: Key,
     ) {
         let entry_count = browser.entries().len();
-        let entry_meta: Vec<(String, bool, usize, PathBuf)> = browser
-            .entries()
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let label = if e.is_directory {
-                    format!("> {}##entry{}", e.name, i)
-                } else {
-                    let kb = e.size_bytes as f64 / 1024.0;
-                    format!("{}  ({:.1} KB)##entry{}", e.name, kb, i)
-                };
-                (label, e.is_directory, i, e.path.clone())
-            })
-            .collect();
 
         if entry_count == 0 {
             if browser.current_directory().is_some() {
@@ -447,6 +457,8 @@ impl BrowserPanel {
             return;
         }
 
+        // Keyboard navigation — mutable borrows happen here, before the
+        // clipper loop takes short immutable borrows to read entry data.
         let selected = browser.selected();
         if ui.is_window_focused() && !search_focused {
             if ui.is_key_pressed_no_repeat(up_key) {
@@ -469,53 +481,71 @@ impl BrowserPanel {
                 || ui.is_key_pressed_no_repeat(Key::KeypadEnter);
             if confirm {
                 if let Some(i) = selected {
-                    let entries = browser.entries();
-                    if let Some(entry) = entries.get(i) {
-                        if entry.is_directory {
-                            if let Err(e) = browser.navigate_into(i) {
-                                log::error!("navigate_into failed: {e}");
-                            }
-                        } else {
-                            browser.play_selected();
+                    let is_dir = browser.entries().get(i).map(|e| e.is_directory);
+                    if is_dir == Some(true) {
+                        if let Err(e) = browser.navigate_into(i) {
+                            log::error!("navigate_into failed: {e}");
                         }
+                    } else if is_dir == Some(false) {
+                        browser.play_selected();
                     }
                 }
             }
         }
-        for (label, is_dir, i, entry_path) in &entry_meta {
-            let is_selected = selected == Some(*i);
-            let display_label = label.split("##").next().unwrap_or(label);
-            let (clicked, used) = if *is_dir {
-                let color =
-                    ui.push_style_color(imgui::StyleColor::Text, [0.55, 0.85, 1.0, 1.0]);
-                let clicked = ui
-                    .selectable_config(display_label)
-                    .selected(is_selected)
-                    .build();
-                color.pop();
-                (clicked, true)
-            } else {
-                (
-                    ui.selectable_config(label).selected(is_selected).build(),
-                    true,
-                )
+
+        // Re-read selected in case keyboard nav changed it.
+        let selected = browser.selected();
+        let mut click_action: Option<(usize, bool, PathBuf)> = None;
+
+        // Only render visible rows. Label strings are allocated per visible
+        // item rather than for the entire listing every frame.
+        let clip = imgui::ListClipper::new(entry_count as i32).begin(ui);
+        for row_i in clip.iter() {
+            let i = row_i as usize;
+            // Extract owned data in a short block so the immutable borrow on
+            // browser ends before we can call any mutable method.
+            let (label, is_dir, path) = {
+                let e = &browser.entries()[i];
+                let label = if e.is_directory {
+                    format!("> {}##entry{}", e.name, i)
+                } else {
+                    format!("{}##entry{}", e.name, i)
+                };
+                (label, e.is_directory, e.path.clone())
             };
-            if !*is_dir
+
+            let is_selected = selected == Some(i);
+            let clicked = if is_dir {
+                let color = ui.push_style_color(imgui::StyleColor::Text, [0.55, 0.85, 1.0, 1.0]);
+                let clicked = ui.selectable_config(&label).selected(is_selected).build();
+                color.pop();
+                clicked
+            } else {
+                ui.selectable_config(&label).selected(is_selected).build()
+            };
+
+            if !is_dir
                 && ui.is_item_hovered()
                 && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
             {
-                *drag_requested = Some(entry_path.clone());
+                *drag_requested = Some(path);
                 break;
             }
-            if clicked && used {
-                browser.select(*i);
-                if *is_dir {
-                    if let Err(e) = browser.navigate_into(*i) {
-                        log::error!("navigate_into failed: {e}");
-                    }
-                } else {
-                    browser.play_selected();
+            if clicked {
+                click_action = Some((i, is_dir, path));
+            }
+        }
+
+        // Apply click after the loop — avoids holding an immutable borrow
+        // on browser.entries() while calling mutable browser methods.
+        if let Some((i, is_dir, _)) = click_action {
+            browser.select(i);
+            if is_dir {
+                if let Err(e) = browser.navigate_into(i) {
+                    log::error!("navigate_into failed: {e}");
                 }
+            } else {
+                browser.play_selected();
             }
         }
     }

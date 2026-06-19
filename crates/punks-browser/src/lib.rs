@@ -229,7 +229,10 @@ impl SampleBrowser {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let results = punks_core::search_directory(&root, &query, SUPPORTED_EXTENSIONS)
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    log::warn!("search in {}: {e}", root.display());
+                    Vec::new()
+                });
             let _ = tx.send(results);
         });
         self.search_rx = Some(rx);
