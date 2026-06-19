@@ -12,6 +12,14 @@ pub struct Keybinds {
     pub navigate_back: String,
     #[serde(default = "default_confirm")]
     pub confirm: String,
+    #[serde(default = "default_new_tab")]
+    pub new_tab: String,
+    #[serde(default = "default_close_tab")]
+    pub close_tab: String,
+    #[serde(default = "default_prev_tab")]
+    pub prev_tab: String,
+    #[serde(default = "default_next_tab")]
+    pub next_tab: String,
 }
 
 fn default_navigate_up() -> String {
@@ -26,6 +34,18 @@ fn default_navigate_back() -> String {
 fn default_confirm() -> String {
     "D".into()
 }
+fn default_new_tab() -> String {
+    "T".into()
+}
+fn default_close_tab() -> String {
+    "X".into()
+}
+fn default_prev_tab() -> String {
+    "LeftArrow".into()
+}
+fn default_next_tab() -> String {
+    "RightArrow".into()
+}
 fn default_volume() -> f32 {
     1.0
 }
@@ -37,6 +57,10 @@ impl Default for Keybinds {
             navigate_down: default_navigate_down(),
             navigate_back: default_navigate_back(),
             confirm: default_confirm(),
+            new_tab: default_new_tab(),
+            close_tab: default_close_tab(),
+            prev_tab: default_prev_tab(),
+            next_tab: default_next_tab(),
         }
     }
 }

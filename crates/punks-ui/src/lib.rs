@@ -11,6 +11,10 @@ enum BrowserAction {
     NavigateDown,
     NavigateBack,
     Confirm,
+    NewTab,
+    CloseTab,
+    PrevTab,
+    NextTab,
 }
 
 const CAPTURABLE_KEYS: &[(Key, &str)] = &[
@@ -70,6 +74,10 @@ fn keybind_field_mut(keybinds: &mut Keybinds, action: BrowserAction) -> &mut Str
         BrowserAction::NavigateDown => &mut keybinds.navigate_down,
         BrowserAction::NavigateBack => &mut keybinds.navigate_back,
         BrowserAction::Confirm => &mut keybinds.confirm,
+        BrowserAction::NewTab => &mut keybinds.new_tab,
+        BrowserAction::CloseTab => &mut keybinds.close_tab,
+        BrowserAction::PrevTab => &mut keybinds.prev_tab,
+        BrowserAction::NextTab => &mut keybinds.next_tab,
     }
 }
 
@@ -79,6 +87,10 @@ fn keybind_field(keybinds: &Keybinds, action: BrowserAction) -> &str {
         BrowserAction::NavigateDown => &keybinds.navigate_down,
         BrowserAction::NavigateBack => &keybinds.navigate_back,
         BrowserAction::Confirm => &keybinds.confirm,
+        BrowserAction::NewTab => &keybinds.new_tab,
+        BrowserAction::CloseTab => &keybinds.close_tab,
+        BrowserAction::PrevTab => &keybinds.prev_tab,
+        BrowserAction::NextTab => &keybinds.next_tab,
     }
 }
 
@@ -87,7 +99,13 @@ const KEYBIND_ACTIONS: &[(BrowserAction, &str)] = &[
     (BrowserAction::NavigateDown, "Navigate down"),
     (BrowserAction::NavigateBack, "Back"),
     (BrowserAction::Confirm, "Confirm / Play"),
+    (BrowserAction::NewTab, "New tab"),
+    (BrowserAction::CloseTab, "Close tab"),
+    (BrowserAction::PrevTab, "Previous tab"),
+    (BrowserAction::NextTab, "Next tab"),
 ];
+
+const ACTIVE_TAB_COLOR: [f32; 4] = [0.26, 0.59, 0.98, 1.0];
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -119,6 +137,9 @@ pub struct BrowserPanel {
     query_change_time: Instant,
     last_searched_query: String,
     volume: f32,
+    /// Tracks the active tab between frames so the search box can be reloaded
+    /// from the newly active tab's stored query when the user switches tabs.
+    last_active_tab: usize,
 }
 
 impl BrowserPanel {
@@ -133,6 +154,7 @@ impl BrowserPanel {
             query_change_time: Instant::now(),
             last_searched_query: String::new(),
             volume,
+            last_active_tab: 0,
         }
     }
 
@@ -143,6 +165,17 @@ impl BrowserPanel {
         on_drag_file: Option<&mut dyn FnMut(&Path)>,
     ) {
         browser.poll();
+
+        // When the active tab changes, reload the search box from that tab's
+        // stored query and resync the debounce trackers so we don't re-issue a
+        // search for text the tab already has results for.
+        if self.last_active_tab != browser.active_tab() {
+            self.search_buf = browser.search_query().to_string();
+            self.last_typed_query = self.search_buf.clone();
+            self.last_searched_query = self.search_buf.clone();
+            self.query_change_time = Instant::now();
+            self.last_active_tab = browser.active_tab();
+        }
 
         // Persist the deepest directory the user has navigated into, so the
         // browser restores exactly where they left off. One check here covers
@@ -155,6 +188,77 @@ impl BrowserPanel {
                 self.prefs.last_directory = Some(dir.to_path_buf());
                 punks_core::config::save(&self.prefs);
             }
+        }
+
+        // --- Tab bar: switch / drag-reorder / close / new ------------------
+        let mut switch_to: Option<usize> = None;
+        let mut close_idx: Option<usize> = None;
+        let mut reorder: Option<(usize, usize)> = None;
+        let mut open_new_tab = false;
+        let tab_count = browser.tab_count();
+        let active_tab = browser.active_tab();
+
+        for i in 0..tab_count {
+            if i > 0 {
+                ui.same_line();
+            }
+            let title = browser.tab_title(i);
+            // Highlight the active tab; scope the color to just its button.
+            let hl = (i == active_tab)
+                .then(|| ui.push_style_color(imgui::StyleColor::Button, ACTIVE_TAB_COLOR));
+            let clicked = ui.button(format!("{title}##tab{i}"));
+            if let Some(tok) = hl {
+                tok.pop();
+            }
+            if clicked {
+                switch_to = Some(i);
+            }
+
+            // Drag this tab as a reorder source; payload is its index.
+            if let Some(tooltip) = ui
+                .drag_drop_source_config("TAB_REORDER")
+                .flags(imgui::DragDropFlags::SOURCE_NO_PREVIEW_TOOLTIP)
+                .begin_payload(i)
+            {
+                tooltip.end();
+            }
+            // Accept a dropped tab: the dragged tab lands at this index.
+            if let Some(target) = ui.drag_drop_target() {
+                if let Some(Ok(payload)) =
+                    target.accept_payload::<usize, _>("TAB_REORDER", imgui::DragDropFlags::empty())
+                {
+                    reorder = Some((payload.data, i));
+                }
+                target.pop();
+            }
+
+            // X closes the tab; hidden on the only tab so one always remains.
+            if tab_count > 1 {
+                ui.same_line();
+                if ui.small_button(format!("x##closetab{i}")) {
+                    close_idx = Some(i);
+                }
+            }
+        }
+        ui.same_line();
+        if ui.small_button("+##newtab") {
+            open_new_tab = true;
+        }
+        ui.separator();
+
+        // Apply deferred tab actions after the loop (mutating shifts indices).
+        if let Some((from, to)) = reorder {
+            browser.reorder_tab(from, to);
+        }
+        if let Some(i) = close_idx {
+            browser.close_tab(i);
+        }
+        if open_new_tab {
+            let start = browser.current_directory().map(|p| p.to_path_buf());
+            browser.new_tab(start.as_deref());
+        }
+        if let Some(i) = switch_to {
+            browser.switch_tab(i);
         }
 
         if ui.button("Browse...") {
@@ -283,24 +387,42 @@ impl BrowserPanel {
 
         ui.separator();
 
-        // Space bar toggles playback in both browse and search modes.
-        if ui.is_window_focused() && !search_focused && ui.is_key_pressed_no_repeat(Key::Space) {
-            match browser.playback_status() {
-                PlaybackStatus::Playing { .. } | PlaybackStatus::Loading { .. } => {
-                    browser.stop();
-                }
-                PlaybackStatus::Idle => {
-                    if in_search {
-                        if let Some(idx) = browser.search_selected() {
-                            if let Some(e) = browser.search_results().and_then(|r| r.get(idx)) {
-                                let path = e.path.clone();
-                                browser.play_file(&path);
+        // Panel-level keys (same focus gating as nav): Space toggles playback;
+        // the tab keybinds switch / create / close tabs.
+        if ui.is_window_focused() && !search_focused {
+            if ui.is_key_pressed_no_repeat(Key::Space) {
+                match browser.playback_status() {
+                    PlaybackStatus::Playing { .. } | PlaybackStatus::Loading { .. } => {
+                        browser.stop();
+                    }
+                    PlaybackStatus::Idle => {
+                        if in_search {
+                            if let Some(idx) = browser.search_selected() {
+                                if let Some(e) = browser.search_results().and_then(|r| r.get(idx)) {
+                                    let path = e.path.clone();
+                                    browser.play_file(&path);
+                                }
                             }
+                        } else {
+                            browser.play_selected();
                         }
-                    } else {
-                        browser.play_selected();
                     }
                 }
+            }
+
+            let count = browser.tab_count();
+            let active = browser.active_tab();
+            let pressed =
+                |bind: &str| parse_key(bind).is_some_and(|k| ui.is_key_pressed_no_repeat(k));
+            if pressed(&self.prefs.keybinds.next_tab) {
+                browser.switch_tab((active + 1) % count);
+            } else if pressed(&self.prefs.keybinds.prev_tab) {
+                browser.switch_tab((active + count - 1) % count);
+            } else if pressed(&self.prefs.keybinds.new_tab) {
+                let start = browser.current_directory().map(|p| p.to_path_buf());
+                browser.new_tab(start.as_deref());
+            } else if pressed(&self.prefs.keybinds.close_tab) {
+                browser.close_tab(browser.active_tab());
             }
         }
 
