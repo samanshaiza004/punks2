@@ -105,7 +105,23 @@ const KEYBIND_ACTIONS: &[(BrowserAction, &str)] = &[
     (BrowserAction::NextTab, "Next tab"),
 ];
 
-const ACTIVE_TAB_COLOR: [f32; 4] = [0.26, 0.59, 0.98, 1.0];
+// Tab palette: active tab carries a muted blue accent, inactive tabs are grey.
+const TAB_ACTIVE_BG: [f32; 4] = [0.24, 0.36, 0.52, 1.0];
+const TAB_ACTIVE_HOVER: [f32; 4] = [0.28, 0.41, 0.59, 1.0];
+const TAB_INACTIVE_BG: [f32; 4] = [0.16, 0.17, 0.20, 1.0];
+const TAB_INACTIVE_HOVER: [f32; 4] = [0.22, 0.23, 0.27, 1.0];
+const TAB_CLOSE_TEXT: [f32; 4] = [0.70, 0.72, 0.76, 1.0];
+
+const DIR_TEXT_COLOR: [f32; 4] = [0.55, 0.85, 1.0, 1.0];
+
+// File list lays out entries in width-adaptive columns; each column is at least
+// this wide, so wide windows show 2+ columns and narrow ones collapse to 1.
+const MIN_COLUMN_WIDTH: f32 = 300.0;
+const COLUMN_GUTTER: f32 = 8.0;
+
+fn column_count(avail_width: f32) -> usize {
+    ((avail_width / MIN_COLUMN_WIDTH).floor() as usize).max(1)
+}
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
@@ -202,15 +218,19 @@ impl BrowserPanel {
             if i > 0 {
                 ui.same_line();
             }
+            let (bg, bg_hover) = if i == active_tab {
+                (TAB_ACTIVE_BG, TAB_ACTIVE_HOVER)
+            } else {
+                (TAB_INACTIVE_BG, TAB_INACTIVE_HOVER)
+            };
+            // The label and close glyph share one pushed background so they read
+            // as a single tab rather than two detached buttons.
+            let cbg = ui.push_style_color(imgui::StyleColor::Button, bg);
+            let chov = ui.push_style_color(imgui::StyleColor::ButtonHovered, bg_hover);
+            let cact = ui.push_style_color(imgui::StyleColor::ButtonActive, bg_hover);
+
             let title = browser.tab_title(i);
-            // Highlight the active tab; scope the color to just its button.
-            let hl = (i == active_tab)
-                .then(|| ui.push_style_color(imgui::StyleColor::Button, ACTIVE_TAB_COLOR));
-            let clicked = ui.button(format!("{title}##tab{i}"));
-            if let Some(tok) = hl {
-                tok.pop();
-            }
-            if clicked {
+            if ui.button(format!("{title}##tab{i}")) {
                 switch_to = Some(i);
             }
 
@@ -232,16 +252,23 @@ impl BrowserPanel {
                 target.pop();
             }
 
-            // X closes the tab; hidden on the only tab so one always remains.
+            // Close glyph, attached flush to the label so the two read as one
+            // tab. Hidden on the only tab so one always remains.
             if tab_count > 1 {
-                ui.same_line();
-                if ui.small_button(format!("x##closetab{i}")) {
+                ui.same_line_with_spacing(0.0, 0.0);
+                let ctext = ui.push_style_color(imgui::StyleColor::Text, TAB_CLOSE_TEXT);
+                if ui.button(format!("\u{00d7}##closetab{i}")) {
                     close_idx = Some(i);
                 }
+                ctext.pop();
             }
+
+            cact.pop();
+            chov.pop();
+            cbg.pop();
         }
         ui.same_line();
-        if ui.small_button("+##newtab") {
+        if ui.button("+##newtab") {
             open_new_tab = true;
         }
         ui.separator();
@@ -520,33 +547,47 @@ impl BrowserPanel {
         let selected = browser.search_selected();
         let mut click_action: Option<(usize, PathBuf)> = None;
 
-        // Only render the visible rows; label strings are allocated per
-        // visible item, not for every result every frame.
-        let clip = imgui::ListClipper::new(count as i32).begin(ui);
-        for row_i in clip.iter() {
-            let i = row_i as usize;
-            // Extract owned data in a short block so the borrow on browser
-            // ends before we call any mutable method.
-            let (label, path) = {
-                let results = browser.search_results().unwrap();
-                let e = &results[i];
-                let parent_hint = relative_parent(root.as_deref(), &e.path);
-                let label = format!("{}  ({})##sresult{}", e.name, parent_hint, i);
-                (label, e.path.clone())
-            };
+        // Width-adaptive columns; the clipper iterates rows of `cols` items so
+        // only visible rows allocate label strings.
+        let avail_w = ui.content_region_avail()[0];
+        let cols = column_count(avail_w);
+        let col_w = avail_w / cols as f32;
+        let num_rows = count.div_ceil(cols);
 
-            let clicked = ui
-                .selectable_config(&label)
-                .selected(selected == Some(i))
-                .build();
-            if ui.is_item_hovered()
-                && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
-            {
-                *drag_requested = Some(path);
-                break;
-            }
-            if clicked {
-                click_action = Some((i, path));
+        let clip = imgui::ListClipper::new(num_rows as i32).begin(ui);
+        'rows: for row in clip.iter() {
+            for c in 0..cols {
+                let i = row as usize * cols + c;
+                if i >= count {
+                    break;
+                }
+                if c > 0 {
+                    ui.same_line_with_pos(c as f32 * col_w);
+                }
+                // Extract owned data in a short block so the borrow on browser
+                // ends before we call any mutable method.
+                let (label, path) = {
+                    let results = browser.search_results().unwrap();
+                    let e = &results[i];
+                    let parent_hint = relative_parent(root.as_deref(), &e.path);
+                    let label = format!("{}  ({})##sresult{}", e.name, parent_hint, i);
+                    (label, e.path.clone())
+                };
+
+                let clicked = ui
+                    .selectable_config(&label)
+                    .selected(selected == Some(i))
+                    .size([col_w - COLUMN_GUTTER, 0.0])
+                    .build();
+                if ui.is_item_hovered()
+                    && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
+                {
+                    *drag_requested = Some(path);
+                    break 'rows;
+                }
+                if clicked {
+                    click_action = Some((i, path));
+                }
             }
         }
 
@@ -619,42 +660,65 @@ impl BrowserPanel {
         let selected = browser.selected();
         let mut click_action: Option<(usize, bool, PathBuf)> = None;
 
-        // Only render visible rows. Label strings are allocated per visible
-        // item rather than for the entire listing every frame.
-        let clip = imgui::ListClipper::new(entry_count as i32).begin(ui);
-        for row_i in clip.iter() {
-            let i = row_i as usize;
-            // Extract owned data in a short block so the immutable borrow on
-            // browser ends before we can call any mutable method.
-            let (label, is_dir, path) = {
-                let e = &browser.entries()[i];
-                let label = if e.is_directory {
-                    format!("> {}##entry{}", e.name, i)
-                } else {
-                    format!("{}##entry{}", e.name, i)
+        // Lay out entries in width-adaptive columns to use horizontal space.
+        // The clipper iterates rows of `cols` items, so off-screen rows are
+        // skipped and label strings are allocated only for visible items.
+        let avail_w = ui.content_region_avail()[0];
+        let cols = column_count(avail_w);
+        let col_w = avail_w / cols as f32;
+        let num_rows = entry_count.div_ceil(cols);
+
+        let clip = imgui::ListClipper::new(num_rows as i32).begin(ui);
+        'rows: for row in clip.iter() {
+            for c in 0..cols {
+                let i = row as usize * cols + c;
+                if i >= entry_count {
+                    break;
+                }
+                if c > 0 {
+                    ui.same_line_with_pos(c as f32 * col_w);
+                }
+
+                // Extract owned data in a short block so the immutable borrow on
+                // browser ends before we call any mutable method.
+                let (label, is_dir, path) = {
+                    let e = &browser.entries()[i];
+                    let label = if e.is_directory {
+                        format!("> {}##entry{}", e.name, i)
+                    } else {
+                        format!("{}##entry{}", e.name, i)
+                    };
+                    (label, e.is_directory, e.path.clone())
                 };
-                (label, e.is_directory, e.path.clone())
-            };
 
-            let is_selected = selected == Some(i);
-            let clicked = if is_dir {
-                let color = ui.push_style_color(imgui::StyleColor::Text, [0.55, 0.85, 1.0, 1.0]);
-                let clicked = ui.selectable_config(&label).selected(is_selected).build();
-                color.pop();
-                clicked
-            } else {
-                ui.selectable_config(&label).selected(is_selected).build()
-            };
+                let is_selected = selected == Some(i);
+                let size = [col_w - COLUMN_GUTTER, 0.0];
+                let clicked = if is_dir {
+                    let color = ui.push_style_color(imgui::StyleColor::Text, DIR_TEXT_COLOR);
+                    let clicked = ui
+                        .selectable_config(&label)
+                        .selected(is_selected)
+                        .size(size)
+                        .build();
+                    color.pop();
+                    clicked
+                } else {
+                    ui.selectable_config(&label)
+                        .selected(is_selected)
+                        .size(size)
+                        .build()
+                };
 
-            if !is_dir
-                && ui.is_item_hovered()
-                && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
-            {
-                *drag_requested = Some(path);
-                break;
-            }
-            if clicked {
-                click_action = Some((i, is_dir, path));
+                if !is_dir
+                    && ui.is_item_hovered()
+                    && ui.is_mouse_dragging_with_threshold(imgui::MouseButton::Left, -1.0)
+                {
+                    *drag_requested = Some(path);
+                    break 'rows;
+                }
+                if clicked {
+                    click_action = Some((i, is_dir, path));
+                }
             }
         }
 
