@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
-pub use punks_playback::{PlaybackError, PlaybackStatus, WaveformPeaks};
+pub use punks_playback::{AudioMetadata, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks};
 
 use punks_playback::PlaybackEngine;
 
@@ -242,6 +242,22 @@ impl SampleBrowser {
 
     pub fn waveform_peaks(&self) -> Option<&WaveformPeaks> {
         self.playback.waveform_peaks()
+    }
+
+    /// Container metadata + preview info for the current track (global, like
+    /// playback). `None` when nothing is loaded.
+    pub fn current_track_info(&self) -> Option<&TrackInfo> {
+        self.playback.current_info()
+    }
+
+    /// Playable duration of the loaded clip, or `None` when nothing is loaded.
+    pub fn loaded_duration(&self) -> Option<std::time::Duration> {
+        self.playback.loaded_duration()
+    }
+
+    /// Seek to `fraction` (0..1) of the loaded clip and play from there.
+    pub fn seek_fraction(&self, fraction: f32) {
+        self.playback.seek_fraction(fraction);
     }
 
     pub fn set_volume(&self, v: f32) {

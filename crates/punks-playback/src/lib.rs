@@ -15,7 +15,19 @@ mod decode;
 pub mod peaks;
 mod resample;
 
+pub use decode::AudioMetadata;
 pub use peaks::WaveformPeaks;
+
+/// Container-level info about the currently loaded track: free-text metadata,
+/// its true source length, and whether only a preview window was decoded.
+#[derive(Debug, Clone)]
+pub struct TrackInfo {
+    pub metadata: AudioMetadata,
+    pub source_sample_rate: u32,
+    pub source_duration: Duration,
+    pub preview_duration: Duration,
+    pub truncated: bool,
+}
 
 #[derive(Debug, Clone)]
 pub enum PlaybackStatus {
@@ -63,6 +75,7 @@ struct PreparedAudio {
     total_frames: usize,
     file: PathBuf,
     peaks: WaveformPeaks,
+    info: TrackInfo,
 }
 
 struct PendingLoad {
@@ -79,6 +92,7 @@ pub struct PlaybackEngine {
     device_channels: u16,
     current_file: Option<PathBuf>,
     current_peaks: Option<WaveformPeaks>,
+    current_info: Option<TrackInfo>,
     pending: Option<PendingLoad>,
     cache: LruCache<PathBuf, Arc<PreparedAudio>>,
 }
@@ -131,6 +145,7 @@ impl PlaybackEngine {
             device_channels: channels,
             current_file: None,
             current_peaks: None,
+            current_info: None,
             pending: None,
             cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
         })
@@ -155,6 +170,7 @@ impl PlaybackEngine {
             .store(audio.total_frames, Ordering::SeqCst);
         self.current_file = Some(audio.file.clone());
         self.current_peaks = Some(audio.peaks.clone());
+        self.current_info = Some(audio.info.clone());
         // Release pairs with the Acquire load in audio_callback, so the
         // callback is guaranteed to observe cursor=0 and the new samples
         // whenever it sees playing==true.
@@ -180,6 +196,7 @@ impl PlaybackEngine {
         }
 
         self.current_peaks = None;
+        self.current_info = None;
         let target_channels = self.device_channels as usize;
         let target_rate = self.device_sample_rate;
 
@@ -203,7 +220,11 @@ impl PlaybackEngine {
         match pending.receiver.try_recv() {
             Ok(Ok(audio)) => {
                 let arc = Arc::new(audio);
-                self.cache.put(arc.file.clone(), Arc::clone(&arc));
+                // Previews of long files are large and re-auditioned rarely; keep
+                // them out of the cache so it stays full of small one-shots.
+                if !arc.info.truncated {
+                    self.cache.put(arc.file.clone(), Arc::clone(&arc));
+                }
                 self.commit(&arc);
                 None
             }
@@ -224,7 +245,10 @@ impl PlaybackEngine {
     pub fn stop(&mut self) {
         self.shared.playing.store(false, Ordering::SeqCst);
         self.pending = None;
-        self.current_file = None;
+        // Keep current_file / current_info (and the decoded buffer) so the clip
+        // stays loaded and scrubbable after Stop — seek_fraction can resume it,
+        // and status() correctly reports Playing once it does. A new play()
+        // overwrites them, so nothing goes stale.
     }
 
     pub fn status(&self) -> PlaybackStatus {
@@ -258,6 +282,43 @@ impl PlaybackEngine {
 
     pub fn waveform_peaks(&self) -> Option<&WaveformPeaks> {
         self.current_peaks.as_ref()
+    }
+
+    pub fn current_info(&self) -> Option<&TrackInfo> {
+        self.current_info.as_ref()
+    }
+
+    /// Playable duration of the currently loaded buffer (device rate), or
+    /// `None` when nothing is loaded. Used by the UI to label scrub positions.
+    pub fn loaded_duration(&self) -> Option<Duration> {
+        let total = self.shared.total_frames.load(Ordering::Relaxed);
+        (total > 0).then(|| Duration::from_secs_f64(total as f64 / self.device_sample_rate as f64))
+    }
+
+    /// Seek to `fraction` (0..1) of the loaded buffer and (re)start playback
+    /// from there. No re-decode: the whole clip is already in `shared.samples`,
+    /// so this just repositions the cursor.
+    ///
+    /// `&self` — atomics only, like `set_volume`. Ordering mirrors `commit`:
+    /// the `cursor` store is published by the `Release` store of `playing`,
+    /// which the audio callback loads with `Acquire`, so a seek from a stopped
+    /// or finished clip never reads a stale position. Seeking mid-playback is
+    /// also safe — `cursor` is a single coherent atomic and the callback
+    /// re-checks bounds every buffer.
+    ///
+    /// Note: this operates on whatever is currently loaded. While a new clip is
+    /// still decoding, that is the *previous* clip's buffer (poll/commit and
+    /// this call are both on the main thread, so there is no race — just the
+    /// previous buffer until the new one commits).
+    pub fn seek_fraction(&self, fraction: f32) {
+        let total = self.shared.total_frames.load(Ordering::Relaxed);
+        if total == 0 {
+            return;
+        }
+        let frame = frame_for_fraction(total, fraction);
+        let channels = self.device_channels.max(1) as usize;
+        self.shared.cursor.store(frame * channels, Ordering::SeqCst);
+        self.shared.playing.store(true, Ordering::Release);
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -298,11 +359,20 @@ fn decode_and_prepare(
 
     let total_frames = samples.len() / target_channels;
 
+    let info = TrackInfo {
+        source_sample_rate: decoded.sample_rate,
+        source_duration: decoded.source_duration,
+        preview_duration: decoded.preview_duration,
+        truncated: decoded.truncated,
+        metadata: decoded.metadata,
+    };
+
     Ok(PreparedAudio {
         samples,
         total_frames,
         file: path.to_path_buf(),
         peaks: waveform_peaks,
+        info,
     })
 }
 
@@ -338,6 +408,16 @@ fn audio_callback(data: &mut [f32], shared: &SharedState) {
     }
 }
 
+/// Map a 0..1 scrub fraction to a frame index in a buffer of `total_frames`.
+/// Clamps out-of-range fractions and never returns `>= total_frames`.
+fn frame_for_fraction(total_frames: usize, fraction: f32) -> usize {
+    if total_frames == 0 {
+        return 0;
+    }
+    let f = fraction.clamp(0.0, 1.0);
+    ((total_frames as f32 * f) as usize).min(total_frames - 1)
+}
+
 fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
     if from == to || from == 0 || to == 0 {
         return samples.to_vec();
@@ -365,4 +445,19 @@ fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frame_for_fraction;
+
+    #[test]
+    fn frame_for_fraction_maps_and_clamps() {
+        assert_eq!(frame_for_fraction(1000, 0.0), 0);
+        assert_eq!(frame_for_fraction(1000, 0.5), 500);
+        assert_eq!(frame_for_fraction(1000, 1.0), 999); // never == total
+        assert_eq!(frame_for_fraction(1000, -1.0), 0); // clamps low
+        assert_eq!(frame_for_fraction(1000, 2.0), 999); // clamps high
+        assert_eq!(frame_for_fraction(0, 0.5), 0); // empty buffer
+    }
 }

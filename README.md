@@ -5,8 +5,12 @@ A modular sample browser for musicians, built in Rust.
 ## What it does
 
 - Browse directories of audio files (WAV, FLAC, MP3, OGG) with breadcrumb navigation
+- Production-sound aware: reads Broadcast Wave (`bext`) description and start timecode,
+  and plays RF64 (>4 GB) field recordings
 - Preview-play through your default audio device — click a file, or use keyboard
   navigation (W/S or arrow keys) to step through and auto-play
+- Long files (> 2 min) preview a bounded window instead of loading whole, so hours-long
+  recordings open instantly and stay memory-bounded
 - Instant replay from an in-memory decode cache when you revisit a sample
 - Volume control for previews, persisted across sessions
 - Recursive filename search from the current directory

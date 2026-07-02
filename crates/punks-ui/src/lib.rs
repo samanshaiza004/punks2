@@ -123,6 +123,30 @@ fn column_count(avail_width: f32) -> usize {
     ((avail_width / MIN_COLUMN_WIDTH).floor() as usize).max(1)
 }
 
+/// Duration as `M:SS` (or `H:MM:SS` past an hour).
+fn format_hms(secs: f64) -> String {
+    let total = secs.max(0.0) as u64;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// bext TimeReference (sample count) as `hh:mm:ss.mmm` start timecode.
+fn format_timecode(samples: u64, sample_rate: u32) -> String {
+    if sample_rate == 0 {
+        return "--".into();
+    }
+    let total_ms = (samples as f64 / sample_rate as f64 * 1000.0) as u64;
+    let ms = total_ms % 1000;
+    let s = (total_ms / 1000) % 60;
+    let m = (total_ms / 60_000) % 60;
+    let h = total_ms / 3_600_000;
+    format!("{h:02}:{m:02}:{s:02}.{ms:03}")
+}
+
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 
 fn relative_parent(root: Option<&Path>, file_path: &Path) -> String {
@@ -156,6 +180,10 @@ pub struct BrowserPanel {
     /// Tracks the active tab between frames so the search box can be reloaded
     /// from the newly active tab's stored query when the user switches tabs.
     last_active_tab: usize,
+    /// Last mouse-x we seeked to during a waveform drag, so a held-still cursor
+    /// lets audio play forward instead of re-seeking every frame. `None` when
+    /// not scrubbing.
+    scrub_last_x: Option<f32>,
 }
 
 impl BrowserPanel {
@@ -171,6 +199,7 @@ impl BrowserPanel {
             last_searched_query: String::new(),
             volume,
             last_active_tab: 0,
+            scrub_last_x: None,
         }
     }
 
@@ -368,7 +397,8 @@ impl BrowserPanel {
         }
 
         let avail = ui.content_region_avail();
-        let list_height = (avail[1] - 110.0).max(100.0);
+        // Reserve room below the list for: waveform + metadata line + transport.
+        let list_height = (avail[1] - 132.0).max(100.0);
         let mut drag_requested: Option<PathBuf> = None;
 
         let up_key = parse_key(&self.prefs.keybinds.navigate_up).unwrap_or(Key::W);
@@ -453,7 +483,38 @@ impl BrowserPanel {
             }
         }
 
-        draw_waveform_widget(ui, browser);
+        draw_waveform_widget(ui, browser, &mut self.scrub_last_x);
+
+        // Container metadata (BWF bext) + long-file preview indicator, one line.
+        // A blank line is reserved when absent so the layout doesn't jump.
+        {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(info) = browser.current_track_info() {
+                if let Some(desc) = info.metadata.description.as_deref() {
+                    if !desc.is_empty() {
+                        parts.push(desc.to_string());
+                    }
+                }
+                if let Some(tc) = info.metadata.time_reference.filter(|&t| t > 0) {
+                    parts.push(format!(
+                        "TC {}",
+                        format_timecode(tc, info.source_sample_rate)
+                    ));
+                }
+                if info.truncated {
+                    parts.push(format!(
+                        "preview: first {} of {}",
+                        format_hms(info.preview_duration.as_secs_f64()),
+                        format_hms(info.source_duration.as_secs_f64()),
+                    ));
+                }
+            }
+            if parts.is_empty() {
+                ui.new_line();
+            } else {
+                ui.text_disabled(parts.join("   \u{b7}   "));
+            }
+        }
 
         // Transport row: volume slider pinned to the right edge of the panel.
         let transport_x = ui.cursor_pos()[0];
@@ -817,6 +878,8 @@ const WAVEFORM_BG: [f32; 4] = [0.12, 0.12, 0.14, 1.0];
 const WAVEFORM_BAR: [f32; 4] = [0.30, 0.75, 0.45, 1.0];
 const WAVEFORM_PLAYHEAD: [f32; 4] = [1.0, 1.0, 1.0, 0.9];
 const WAVEFORM_TEXT: [f32; 4] = [1.0, 1.0, 1.0, 0.85];
+// Subtle hover/scrub crosshair — dimmer than the opaque playhead.
+const WAVEFORM_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.35];
 
 fn color_u32(c: [f32; 4]) -> u32 {
     let r = (c[0] * 255.0) as u32;
@@ -826,11 +889,17 @@ fn color_u32(c: [f32; 4]) -> u32 {
     (a << 24) | (b << 16) | (g << 8) | r
 }
 
-fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser) {
+fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser, scrub_last_x: &mut Option<f32>) {
     let [cx, cy] = ui.cursor_screen_pos();
     let w = ui.content_region_avail()[0];
     const H: f32 = 64.0;
-    ui.dummy([w, H]);
+
+    // Interactive hit area (replaces the passive dummy) for hover + scrub.
+    let clicked = ui.invisible_button("##waveform", [w, H]);
+    let hovered = ui.is_item_hovered();
+    let active = ui.is_item_active();
+    let scrubbable = browser.loaded_duration().is_some();
+    let mouse_x = ui.io().mouse_pos[0];
 
     let draw = ui.get_window_draw_list();
 
@@ -904,5 +973,36 @@ fn draw_waveform_widget(ui: &imgui::Ui, browser: &SampleBrowser) {
                 );
             }
         }
+    }
+
+    // Hover / scrub crosshair + time label at the mouse position.
+    if scrubbable && (hovered || active) {
+        let mx = mouse_x.clamp(cx, cx + w);
+        let hover = color_u32(WAVEFORM_HOVER);
+        draw.add_line([mx, cy], [mx, cy + H], hover).build();
+        let mid = cy + H / 2.0;
+        draw.add_line([mx - 4.0, mid], [mx + 4.0, mid], hover)
+            .build();
+        if let Some(dur) = browser.loaded_duration() {
+            let frac = ((mx - cx) / w).clamp(0.0, 1.0);
+            let t = (dur.as_secs_f64() * frac as f64) as u64;
+            let label = format!("{}:{:02}", t / 60, t % 60);
+            let lx = (mx + 4.0).clamp(cx + 2.0, cx + w - 36.0);
+            draw.add_text([lx, cy + 2.0], color_u32(WAVEFORM_TEXT), label);
+        }
+        ui.set_mouse_cursor(Some(imgui::MouseCursor::ResizeEW));
+    }
+
+    // Click seeks once; drag follows the cursor. Re-seek only when the cursor
+    // moved >= 1px since the last seek, so a held-still cursor lets audio play
+    // forward instead of re-triggering the same grain every frame.
+    if scrubbable && (active || clicked) {
+        let mx = mouse_x.clamp(cx, cx + w);
+        if scrub_last_x.is_none_or(|lx| (mx - lx).abs() >= 1.0) {
+            browser.seek_fraction((mx - cx) / w);
+            *scrub_last_x = Some(mx);
+        }
+    } else {
+        *scrub_last_x = None;
     }
 }
