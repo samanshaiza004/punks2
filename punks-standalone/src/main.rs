@@ -106,8 +106,10 @@ impl AppWindow {
     fn new(event_loop: &ActiveEventLoop) -> Self {
         let gpu = Self::init_gpu(event_loop);
         let imgui = Self::init_imgui(&gpu);
-        let browser = SampleBrowser::new().expect("failed to initialize audio engine");
+        // BrowserPanel loads the config; SampleBrowser reuses that copy
+        // instead of reading it from disk again (P3).
         let panel = BrowserPanel::new();
+        let browser = SampleBrowser::new(panel.prefs()).expect("failed to initialize audio engine");
 
         AppWindow {
             gpu,

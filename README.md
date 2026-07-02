@@ -50,9 +50,10 @@ punks-ui = { path = "crates/punks-ui" }  # if using imgui
 ```
 
 ```rust
-use punks_browser::SampleBrowser;
+use punks_browser::{PunksConfig, SampleBrowser};
 
-let mut browser = SampleBrowser::new()?;
+let cfg = PunksConfig::default(); // or punks_core::config::load()
+let mut browser = SampleBrowser::new(&cfg)?;
 browser.open_directory(Path::new("/path/to/samples"))?;
 browser.select(0);
 browser.play_selected();

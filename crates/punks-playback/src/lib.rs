@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 use lru::LruCache;
@@ -78,9 +78,39 @@ struct PreparedAudio {
     info: TrackInfo,
 }
 
-struct PendingLoad {
-    file: PathBuf,
-    receiver: mpsc::Receiver<Result<PreparedAudio, PlaybackError>>,
+/// A "latest wins" single-slot mailbox: `send` replaces whatever is waiting
+/// (if anything), `recv` blocks until a value is available. This coalesces
+/// rapid decode requests into a single persistent worker thread — if several
+/// `send`s land before the worker is free, only the most recent one is ever
+/// received.
+struct RequestSlot<T> {
+    slot: Mutex<Option<T>>,
+    cv: Condvar,
+}
+
+impl<T> RequestSlot<T> {
+    fn new() -> Self {
+        RequestSlot {
+            slot: Mutex::new(None),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn send(&self, value: T) {
+        let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(value);
+        self.cv.notify_one();
+    }
+
+    fn recv(&self) -> T {
+        let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(value) = guard.take() {
+                return value;
+            }
+            guard = self.cv.wait(guard).unwrap_or_else(|e| e.into_inner());
+        }
+    }
 }
 
 const CACHE_CAPACITY: usize = 10;
@@ -93,8 +123,11 @@ pub struct PlaybackEngine {
     current_file: Option<PathBuf>,
     current_peaks: Option<WaveformPeaks>,
     current_info: Option<TrackInfo>,
-    pending: Option<PendingLoad>,
+    /// File we're currently awaiting a decode for, if any.
+    pending: Option<PathBuf>,
     cache: LruCache<PathBuf, Arc<PreparedAudio>>,
+    decode_request: Arc<RequestSlot<PathBuf>>,
+    decode_result_rx: mpsc::Receiver<(PathBuf, Result<PreparedAudio, PlaybackError>)>,
 }
 
 impl PlaybackEngine {
@@ -138,6 +171,33 @@ impl PlaybackEngine {
             .play()
             .map_err(|e| PlaybackError::DeviceError(e.to_string()))?;
 
+        // One persistent decode worker for the engine's lifetime, instead of a
+        // thread per play() call. Rapid navigation (holding W/S) now coalesces
+        // into a single in-flight decode via RequestSlot rather than spawning
+        // and fully decoding a thread per keypress.
+        let decode_request = Arc::new(RequestSlot::<PathBuf>::new());
+        let (result_tx, result_rx) = mpsc::channel();
+        {
+            let decode_request = Arc::clone(&decode_request);
+            let target_channels = channels as usize;
+            let target_rate = sample_rate;
+            std::thread::spawn(move || loop {
+                let path = decode_request.recv();
+                let result = decode_and_prepare(&path, target_channels, target_rate);
+                // ponytail: no explicit shutdown signal. If the engine is
+                // dropped while this thread is between decodes (blocked in
+                // recv()), the thread parks forever rather than exiting.
+                // Acceptable because PlaybackEngine is owned by SampleBrowser
+                // for the app's entire process lifetime today — process exit
+                // reclaims it regardless. Upgrade path if that ever changes:
+                // give RequestSlot a Shutdown variant the worker checks after
+                // waking.
+                if result_tx.send((path, result)).is_err() {
+                    break; // receiver dropped; nothing left to report to.
+                }
+            });
+        }
+
         Ok(PlaybackEngine {
             shared,
             _stream: stream,
@@ -148,6 +208,8 @@ impl PlaybackEngine {
             current_info: None,
             pending: None,
             cache: LruCache::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
+            decode_request,
+            decode_result_rx: result_rx,
         })
     }
 
@@ -180,64 +242,68 @@ impl PlaybackEngine {
 
     /// Begin loading and playing a file. If the file was recently decoded it
     /// is served from an in-memory cache and playback starts immediately.
-    /// Otherwise decoding and resampling happen on a background thread — this
-    /// returns immediately. Call [`poll`] each frame to check for completion
-    /// and commit the audio buffer.
+    /// Otherwise the request is handed to the persistent decode worker and
+    /// this returns immediately. Call [`poll`] each frame to check for
+    /// completion and commit the audio buffer.
     pub fn play(&mut self, path: &Path) {
         self.shared.playing.store(false, Ordering::SeqCst);
-        self.pending = None;
 
         let path_buf = path.to_path_buf();
 
         if let Some(cached) = self.cache.get(&path_buf) {
             let cached = Arc::clone(cached);
+            self.pending = None;
             self.commit(&cached);
             return;
         }
 
         self.current_peaks = None;
         self.current_info = None;
-        let target_channels = self.device_channels as usize;
-        let target_rate = self.device_sample_rate;
 
-        let (tx, rx) = mpsc::channel();
-
-        let thread_path = path_buf.clone();
-        std::thread::spawn(move || {
-            let result = decode_and_prepare(&thread_path, target_channels, target_rate);
-            let _ = tx.send(result);
-        });
-
-        self.pending = Some(PendingLoad {
-            file: path_buf,
-            receiver: rx,
-        });
+        // If a decode is already in flight, this replaces the queued path —
+        // RequestSlot coalesces to the latest — so rapid navigation collapses
+        // into a single decode instead of spawning a thread per keypress.
+        self.decode_request.send(path_buf.clone());
+        self.pending = Some(path_buf);
     }
 
     pub fn poll(&mut self) -> Option<PlaybackError> {
-        let pending = self.pending.as_ref()?;
+        self.pending.as_ref()?;
 
-        match pending.receiver.try_recv() {
-            Ok(Ok(audio)) => {
-                let arc = Arc::new(audio);
-                // Previews of long files are large and re-auditioned rarely; keep
-                // them out of the cache so it stays full of small one-shots.
-                if !arc.info.truncated {
-                    self.cache.put(arc.file.clone(), Arc::clone(&arc));
+        loop {
+            match self.decode_result_rx.try_recv() {
+                Ok((path, result)) => {
+                    // A result for a request superseded by a later play() call
+                    // (or abandoned for a cache hit) — discard and keep
+                    // draining rather than returning it.
+                    if self.pending.as_deref() != Some(path.as_path()) {
+                        continue;
+                    }
+                    return match result {
+                        Ok(audio) => {
+                            let arc = Arc::new(audio);
+                            // Previews of long files are large and re-auditioned
+                            // rarely; keep them out of the cache so it stays
+                            // full of small one-shots.
+                            if !arc.info.truncated {
+                                self.cache.put(arc.file.clone(), Arc::clone(&arc));
+                            }
+                            self.commit(&arc);
+                            None
+                        }
+                        Err(e) => {
+                            self.pending = None;
+                            Some(e)
+                        }
+                    };
                 }
-                self.commit(&arc);
-                None
-            }
-            Ok(Err(e)) => {
-                self.pending = None;
-                Some(e)
-            }
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.pending = None;
-                Some(PlaybackError::DecodeError(
-                    "decode thread terminated unexpectedly".into(),
-                ))
+                Err(mpsc::TryRecvError::Empty) => return None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending = None;
+                    return Some(PlaybackError::DecodeError(
+                        "decode worker terminated unexpectedly".into(),
+                    ));
+                }
             }
         }
     }
@@ -252,10 +318,8 @@ impl PlaybackEngine {
     }
 
     pub fn status(&self) -> PlaybackStatus {
-        if let Some(pending) = &self.pending {
-            return PlaybackStatus::Loading {
-                file: pending.file.clone(),
-            };
+        if let Some(file) = &self.pending {
+            return PlaybackStatus::Loading { file: file.clone() };
         }
 
         if !self.shared.playing.load(Ordering::Relaxed) {
@@ -449,7 +513,9 @@ fn adapt_channels(samples: &[f32], from: usize, to: usize) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::frame_for_fraction;
+    use super::{frame_for_fraction, RequestSlot};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn frame_for_fraction_maps_and_clamps() {
@@ -459,5 +525,25 @@ mod tests {
         assert_eq!(frame_for_fraction(1000, -1.0), 0); // clamps low
         assert_eq!(frame_for_fraction(1000, 2.0), 999); // clamps high
         assert_eq!(frame_for_fraction(0, 0.5), 0); // empty buffer
+    }
+
+    #[test]
+    fn request_slot_coalesces_to_latest() {
+        // Several sends before anyone reads: only the last one should surface.
+        let slot = RequestSlot::new();
+        slot.send(1);
+        slot.send(2);
+        slot.send(3);
+        assert_eq!(slot.recv(), 3);
+    }
+
+    #[test]
+    fn request_slot_recv_blocks_until_send() {
+        let slot = Arc::new(RequestSlot::new());
+        let reader = Arc::clone(&slot);
+        let handle = std::thread::spawn(move || reader.recv());
+        std::thread::sleep(Duration::from_millis(20));
+        slot.send(42);
+        assert_eq!(handle.join().unwrap(), 42);
     }
 }

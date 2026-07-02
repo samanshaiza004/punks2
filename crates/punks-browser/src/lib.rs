@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
+pub use punks_core::config::PunksConfig;
 pub use punks_core::{DirListing, FileEntry, ScanError, SUPPORTED_EXTENSIONS};
 pub use punks_playback::{AudioMetadata, PlaybackError, PlaybackStatus, TrackInfo, WaveformPeaks};
 
@@ -60,7 +61,10 @@ pub struct SampleBrowser {
 }
 
 impl SampleBrowser {
-    pub fn new() -> Result<Self, BrowserError> {
+    /// `cfg` is read once by the caller (see `BrowserPanel::prefs`) rather than
+    /// loaded again here, so a single app startup only touches disk once for
+    /// config instead of once per component that needs it.
+    pub fn new(cfg: &PunksConfig) -> Result<Self, BrowserError> {
         let playback = PlaybackEngine::new()?;
         let mut browser = SampleBrowser {
             tabs: vec![TabState::default()],
@@ -69,10 +73,9 @@ impl SampleBrowser {
             last_error: None,
         };
 
-        let cfg = punks_core::config::load();
         browser.playback.set_volume(cfg.volume);
-        if let Some(dir) = cfg.last_directory.filter(|p| p.is_dir()) {
-            let _ = browser.open_directory(&dir);
+        if let Some(dir) = cfg.last_directory.as_deref().filter(|p| p.is_dir()) {
+            let _ = browser.open_directory(dir);
         }
 
         Ok(browser)

@@ -203,6 +203,13 @@ impl BrowserPanel {
         }
     }
 
+    /// The config loaded at construction, for callers (e.g. the app shell)
+    /// that need to share it with other components instead of loading it a
+    /// second time.
+    pub fn prefs(&self) -> &PunksConfig {
+        &self.prefs
+    }
+
     pub fn draw(
         &mut self,
         ui: &imgui::Ui,
